@@ -992,6 +992,7 @@ pub async fn start_hysteria2_server(
             // values estimated from https://github.com/apernet/hysteria/blob/5520bcc405ee11a47c164c75bae5c40fc2b1d99d/core/server/config.go#L16
             Arc::get_mut(&mut server_config.transport)
                 .unwrap()
+                .congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()))
                 .max_concurrent_bidi_streams(4096_u32.into())
                 // required for HTTP/3 QPACK updates
                 .max_concurrent_uni_streams(1024_u32.into())
