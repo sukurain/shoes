@@ -317,14 +317,14 @@ async fn session_task(
                 let dest = socket_addr_to_net_location(dest_addr);
 
                 // Remove dead destination entry so we recreate below
-                if let Some(entry) = destinations.get(&dest) {
-                    if entry.handle.is_finished() {
-                        debug!(
-                            "[TunUdpSession {}] Destination task for {} died, recreating",
-                            peer_addr, dest
-                        );
-                        destinations.remove(&dest);
-                    }
+                if let Some(entry) = destinations.get(&dest)
+                    && entry.handle.is_finished()
+                {
+                    debug!(
+                        "[TunUdpSession {}] Destination task for {} died, recreating",
+                        peer_addr, dest
+                    );
+                    destinations.remove(&dest);
                 }
 
                 // Create destination task if absent
@@ -452,7 +452,10 @@ async fn destination_task(
                 );
 
                 // (payload, src=remote, dst=local_app)
-                if response_tx.try_send((buf.filled().to_vec(), source_addr, peer_addr)).is_err() {
+                if response_tx
+                    .try_send((buf.filled().to_vec(), source_addr, peer_addr))
+                    .is_err()
+                {
                     debug!(
                         "[TunUdpSession {}] Response channel full, dropping response from {}",
                         peer_addr, source_addr
@@ -469,11 +472,7 @@ async fn destination_task(
             Action::Write(Some(payload)) => {
                 sleep.as_mut().reset(Instant::now() + CONNECTION_TIMEOUT);
 
-                match tokio::time::timeout(
-                    WRITE_TIMEOUT,
-                    send_message(&mut stream, &payload),
-                )
-                .await
+                match tokio::time::timeout(WRITE_TIMEOUT, send_message(&mut stream, &payload)).await
                 {
                     Ok(Ok(())) => {}
                     Ok(Err(e)) => {

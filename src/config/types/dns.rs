@@ -12,6 +12,17 @@ fn default_timeout_secs() -> u32 {
     5
 }
 
+/// Default connect timeout for DNS upstream connections in seconds.
+fn default_connect_timeout_secs() -> u32 {
+    5
+}
+
+/// Default number of retry attempts for custom DNS groups.
+/// Lower than hickory's default to avoid turning transient failures into slow successes.
+fn default_attempts() -> usize {
+    1
+}
+
 /// A DNS server specification in config.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(untagged)]
@@ -35,9 +46,19 @@ pub enum DnsServerSpec {
         /// IP lookup strategy for DNS resolution. Defaults to ipv4_then_ipv6.
         #[serde(default)]
         ip_strategy: IpStrategy,
-        /// Timeout for DNS resolution in seconds. Defaults to 10. Set to 0 to disable.
+        /// Timeout for DNS resolution in seconds. Defaults to 5. Set to 0 to disable.
         #[serde(default = "default_timeout_secs")]
         timeout_secs: u32,
+        /// Timeout for establishing connections to DNS upstreams in seconds.
+        /// Defaults to 5. Separate from timeout_secs which covers the full request.
+        /// For plain `tcp://` upstreams, hickory also passes the request timeout
+        /// into `connect_tcp`, so the runtime uses the shorter of that value and
+        /// this connect timeout.
+        #[serde(default = "default_connect_timeout_secs")]
+        connect_timeout_secs: u32,
+        /// Number of retry attempts for failed queries. Defaults to 1.
+        #[serde(default = "default_attempts")]
+        attempts: usize,
     },
 }
 
@@ -106,13 +127,35 @@ impl DnsServerSpec {
         }
     }
 
-    /// Get the timeout in seconds (defaults to 10 for Simple variant).
+    /// Get the timeout in seconds (defaults to 5 for Simple variant).
     /// Returns 0 if timeout is disabled.
     pub fn timeout_secs(&self) -> u32 {
         if let Self::WithOptions { timeout_secs, .. } = self {
             *timeout_secs
         } else {
             default_timeout_secs()
+        }
+    }
+
+    /// Get the connect timeout in seconds (defaults to 5 for Simple variant).
+    pub fn connect_timeout_secs(&self) -> u32 {
+        if let Self::WithOptions {
+            connect_timeout_secs,
+            ..
+        } = self
+        {
+            *connect_timeout_secs
+        } else {
+            default_connect_timeout_secs()
+        }
+    }
+
+    /// Get the number of retry attempts (defaults to 1 for Simple variant).
+    pub fn attempts(&self) -> usize {
+        if let Self::WithOptions { attempts, .. } = self {
+            *attempts
+        } else {
+            default_attempts()
         }
     }
 }
@@ -167,6 +210,10 @@ pub struct ExpandedDnsSpec {
     pub ip_strategy: IpStrategy,
     /// Timeout for DNS resolution in seconds. 0 means no timeout.
     pub timeout_secs: u32,
+    /// Timeout for establishing connections to DNS upstreams in seconds.
+    pub connect_timeout_secs: u32,
+    /// Number of retry attempts for failed queries.
+    pub attempts: usize,
 }
 
 /// A DNS group with all specs expanded.
@@ -334,6 +381,8 @@ servers: my-dns-group
             server_name: None,
             ip_strategy: IpStrategy::default(),
             timeout_secs: default_timeout_secs(),
+            connect_timeout_secs: default_connect_timeout_secs(),
+            attempts: default_attempts(),
         };
         assert!(!spec.as_group_ref().is_some());
         assert!(spec.as_group_ref().is_none());
@@ -357,5 +406,65 @@ dns_servers:
         assert!(servers[1].as_group_ref().is_some());
         assert_eq!(servers[1].as_group_ref(), Some("fast-dns"));
         assert!(!servers[2].as_group_ref().is_some());
+    }
+
+    #[test]
+    fn test_dns_server_spec_attempts_default() {
+        let yaml = r#"udp://8.8.8.8"#;
+        let spec: DnsServerSpec = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(spec.attempts(), 1);
+    }
+
+    #[test]
+    fn test_dns_server_spec_attempts_custom() {
+        let yaml = r#"
+url: tls://8.8.8.8
+server_name: dns.google
+attempts: 3
+"#;
+        let spec: DnsServerSpec = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(spec.attempts(), 3);
+    }
+
+    #[test]
+    fn test_dns_server_spec_connect_timeout_default() {
+        let yaml = r#"udp://8.8.8.8"#;
+        let spec: DnsServerSpec = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(spec.connect_timeout_secs(), 5);
+    }
+
+    #[test]
+    fn test_dns_server_spec_connect_timeout_custom() {
+        let yaml = r#"
+url: tls://8.8.8.8
+connect_timeout_secs: 2
+"#;
+        let spec: DnsServerSpec = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(spec.connect_timeout_secs(), 2);
+    }
+
+    #[test]
+    fn test_dns_server_spec_timeout_secs_default() {
+        let yaml = r#"udp://8.8.8.8"#;
+        let spec: DnsServerSpec = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(spec.timeout_secs(), 5);
+    }
+
+    #[test]
+    fn test_dns_server_spec_full_options() {
+        let yaml = r#"
+url: https://1.1.1.1/dns-query
+server_name: cloudflare-dns.com
+timeout_secs: 3
+connect_timeout_secs: 1
+attempts: 1
+ip_strategy: ipv4_only
+"#;
+        let spec: DnsServerSpec = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(spec.timeout_secs(), 3);
+        assert_eq!(spec.connect_timeout_secs(), 1);
+        assert_eq!(spec.attempts(), 1);
+        assert_eq!(spec.ip_strategy(), IpStrategy::Ipv4Only);
+        assert_eq!(spec.server_name(), Some("cloudflare-dns.com"));
     }
 }

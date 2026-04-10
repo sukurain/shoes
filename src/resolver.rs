@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 
 use futures::future::{FutureExt, Shared};
 use log::debug;
+use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
+use tokio::sync::{Mutex as AsyncMutex, RwLock};
 
 use crate::address::{NetLocation, ResolvedLocation};
 
@@ -78,6 +80,149 @@ impl<T: Resolver> Resolver for TimeoutResolver<T> {
     }
 }
 
+type ResolverFactoryFuture =
+    Pin<Box<dyn Future<Output = std::io::Result<Arc<dyn Resolver>>> + Send>>;
+
+pub type ResolverFactory = Arc<dyn Fn() -> ResolverFactoryFuture + Send + Sync>;
+
+/// Policy controlling when a RefreshingResolver rebuilds its inner resolver.
+#[derive(Debug, Clone, Copy)]
+pub struct RefreshPolicy {
+    /// Rebuild the inner resolver if it has been idle longer than this.
+    pub max_idle: Duration,
+    /// After a refreshable error, rebuild and retry the lookup once.
+    pub retry_once_after_refresh: bool,
+}
+
+/// Resolver wrapper that rebuilds its inner resolver on idle timeout or
+/// connection-related errors. Targets stale pooled connection state in
+/// hickory-backed resolvers.
+pub struct RefreshingResolver {
+    factory: ResolverFactory,
+    inner: Arc<RwLock<Arc<dyn Resolver>>>,
+    refresh_lock: Arc<AsyncMutex<()>>,
+    last_success_at: Arc<Mutex<Option<Instant>>>,
+    policy: RefreshPolicy,
+    description: String,
+}
+
+impl Debug for RefreshingResolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RefreshingResolver")
+            .field("description", &self.description)
+            .field("max_idle", &self.policy.max_idle)
+            .finish()
+    }
+}
+
+impl RefreshingResolver {
+    pub async fn new(
+        factory: ResolverFactory,
+        policy: RefreshPolicy,
+        description: String,
+    ) -> std::io::Result<Self> {
+        let inner = factory().await?;
+        Ok(Self {
+            factory,
+            inner: Arc::new(RwLock::new(inner)),
+            refresh_lock: Arc::new(AsyncMutex::new(())),
+            last_success_at: Arc::new(Mutex::new(None)),
+            policy,
+            description,
+        })
+    }
+
+    fn should_refresh_for_error(err: &std::io::Error) -> bool {
+        matches!(
+            err.kind(),
+            std::io::ErrorKind::TimedOut
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::UnexpectedEof
+                | std::io::ErrorKind::NotConnected
+        )
+    }
+}
+
+impl Resolver for RefreshingResolver {
+    fn resolve_location(&self, location: &NetLocation) -> ResolveFuture {
+        if let Some(socket_addr) = location.to_socket_addr_nonblocking() {
+            return Box::pin(async move { Ok(vec![socket_addr]) });
+        }
+
+        let location = location.clone();
+        let inner = self.inner.clone();
+        let refresh_lock = self.refresh_lock.clone();
+        let factory = self.factory.clone();
+        let last_success_at = self.last_success_at.clone();
+        let policy = self.policy;
+        let description = self.description.clone();
+
+        Box::pin(async move {
+            // Refresh if idle too long (double-checked locking).
+            if matches!(*last_success_at.lock(), Some(last) if last.elapsed() > policy.max_idle) {
+                let _guard = refresh_lock.lock().await;
+                if matches!(*last_success_at.lock(), Some(last) if last.elapsed() > policy.max_idle)
+                {
+                    log::info!(
+                        "RefreshingResolver ({}): rebuilding after idle timeout ({:?})",
+                        description,
+                        policy.max_idle
+                    );
+                    match factory().await {
+                        Ok(fresh) => *inner.write().await = fresh,
+                        Err(e) => {
+                            log::warn!(
+                                "RefreshingResolver ({}): idle refresh failed: {}",
+                                description,
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+
+            let current = inner.read().await.clone();
+            match current.resolve_location(&location).await {
+                Ok(addrs) => {
+                    *last_success_at.lock() = Some(Instant::now());
+                    Ok(addrs)
+                }
+                Err(err)
+                    if policy.retry_once_after_refresh
+                        && RefreshingResolver::should_refresh_for_error(&err) =>
+                {
+                    log::info!(
+                        "RefreshingResolver ({}): refresh-on-error ({}) for {}",
+                        description,
+                        err.kind(),
+                        location
+                    );
+                    let _guard = refresh_lock.lock().await;
+                    match factory().await {
+                        Ok(fresh) => {
+                            *inner.write().await = fresh.clone();
+                            let addrs = fresh.resolve_location(&location).await?;
+                            *last_success_at.lock() = Some(Instant::now());
+                            Ok(addrs)
+                        }
+                        Err(factory_err) => {
+                            log::warn!(
+                                "RefreshingResolver ({}): error-refresh factory failed: {}",
+                                description,
+                                factory_err
+                            );
+                            Err(err)
+                        }
+                    }
+                }
+                Err(err) => Err(err),
+            }
+        })
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct NativeResolver;
 
@@ -118,6 +263,25 @@ pub async fn resolve_single_address(
         )));
     }
     Ok(resolve_results[0])
+}
+
+/// Resolve all addresses for a location. Returns a single-element vec
+/// for IP literals, or the full set from the resolver.
+pub async fn resolve_addresses(
+    resolver: &Arc<dyn Resolver>,
+    location: &NetLocation,
+) -> std::io::Result<Vec<SocketAddr>> {
+    if let Some(socket_addr) = location.to_socket_addr_nonblocking() {
+        return Ok(vec![socket_addr]);
+    }
+
+    let addrs = resolver.resolve_location(location).await?;
+    if addrs.is_empty() {
+        return Err(std::io::Error::other(format!(
+            "could not resolve location: {location}"
+        )));
+    }
+    Ok(addrs)
 }
 
 /// Resolve a ResolvedLocation lazily. If already resolved, returns the cached
@@ -334,5 +498,246 @@ impl ResolverCache {
                 Poll::Ready(Err(std::io::Error::new(e.kind(), e.to_string())))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::address::Address;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A mock resolver that returns configurable results, tracking call count.
+    #[derive(Debug)]
+    struct MockResolver {
+        addrs: Vec<SocketAddr>,
+        call_count: AtomicUsize,
+        error_kind: Option<std::io::ErrorKind>,
+    }
+
+    impl MockResolver {
+        fn with_addrs(addrs: Vec<SocketAddr>) -> Self {
+            Self {
+                addrs,
+                call_count: AtomicUsize::new(0),
+                error_kind: None,
+            }
+        }
+
+        fn with_error(kind: std::io::ErrorKind) -> Self {
+            Self {
+                addrs: vec![],
+                call_count: AtomicUsize::new(0),
+                error_kind: Some(kind),
+            }
+        }
+
+        fn count(&self) -> usize {
+            self.call_count.load(Ordering::Relaxed)
+        }
+    }
+
+    impl Resolver for MockResolver {
+        fn resolve_location(&self, _location: &NetLocation) -> ResolveFuture {
+            self.call_count.fetch_add(1, Ordering::Relaxed);
+            let addrs = self.addrs.clone();
+            let error_kind = self.error_kind;
+            Box::pin(async move {
+                if let Some(kind) = error_kind {
+                    Err(std::io::Error::new(kind, "mock error"))
+                } else {
+                    Ok(addrs)
+                }
+            })
+        }
+    }
+
+    /// A mock resolver that fails the first N calls then succeeds.
+    #[derive(Debug)]
+    struct FlakyResolver {
+        fail_count: AtomicUsize,
+        fails_remaining: AtomicUsize,
+        error_kind: std::io::ErrorKind,
+        success_addrs: Vec<SocketAddr>,
+    }
+
+    impl FlakyResolver {
+        fn new(
+            fail_first_n: usize,
+            error_kind: std::io::ErrorKind,
+            success_addrs: Vec<SocketAddr>,
+        ) -> Self {
+            Self {
+                fail_count: AtomicUsize::new(0),
+                fails_remaining: AtomicUsize::new(fail_first_n),
+                error_kind,
+                success_addrs,
+            }
+        }
+    }
+
+    impl Resolver for FlakyResolver {
+        fn resolve_location(&self, _location: &NetLocation) -> ResolveFuture {
+            let remaining = self.fails_remaining.fetch_sub(1, Ordering::Relaxed);
+            if remaining > 0 {
+                self.fail_count.fetch_add(1, Ordering::Relaxed);
+                let kind = self.error_kind;
+                Box::pin(async move { Err(std::io::Error::new(kind, "flaky error")) })
+            } else {
+                let addrs = self.success_addrs.clone();
+                Box::pin(async move { Ok(addrs) })
+            }
+        }
+    }
+
+    fn test_location() -> NetLocation {
+        NetLocation::new(Address::Hostname("example.com".to_string()), 80)
+    }
+
+    fn test_addrs() -> Vec<SocketAddr> {
+        vec!["127.0.0.1:80".parse().unwrap()]
+    }
+
+    #[tokio::test]
+    async fn test_refreshing_resolver_retries_after_timeout() {
+        let success_addrs = test_addrs();
+        let call_count = Arc::new(AtomicUsize::new(0));
+
+        let call_count_clone = call_count.clone();
+        let addrs = success_addrs.clone();
+        let factory: ResolverFactory = Arc::new(move || {
+            let n = call_count_clone.fetch_add(1, Ordering::Relaxed);
+            let addrs = addrs.clone();
+            Box::pin(async move {
+                if n == 0 {
+                    // First build: return a resolver that times out
+                    Ok(
+                        Arc::new(MockResolver::with_error(std::io::ErrorKind::TimedOut))
+                            as Arc<dyn Resolver>,
+                    )
+                } else {
+                    // Refresh build: return a resolver that succeeds
+                    Ok(Arc::new(MockResolver::with_addrs(addrs)) as Arc<dyn Resolver>)
+                }
+            })
+        });
+
+        let policy = RefreshPolicy {
+            max_idle: Duration::from_secs(60),
+            retry_once_after_refresh: true,
+        };
+
+        let resolver = RefreshingResolver::new(factory, policy, "test".to_string())
+            .await
+            .unwrap();
+
+        let result = resolver.resolve_location(&test_location()).await.unwrap();
+        assert_eq!(result, success_addrs);
+        // Factory called twice: initial build + refresh-on-error
+        assert_eq!(call_count.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn test_refreshing_resolver_no_retry_on_non_refreshable_error() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+
+        let call_count_clone = call_count.clone();
+        let factory: ResolverFactory = Arc::new(move || {
+            call_count_clone.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async move {
+                // Return a resolver that returns a non-refreshable error
+                Ok(
+                    Arc::new(MockResolver::with_error(std::io::ErrorKind::Other))
+                        as Arc<dyn Resolver>,
+                )
+            })
+        });
+
+        let policy = RefreshPolicy {
+            max_idle: Duration::from_secs(60),
+            retry_once_after_refresh: true,
+        };
+
+        let resolver = RefreshingResolver::new(factory, policy, "test".to_string())
+            .await
+            .unwrap();
+
+        let result = resolver.resolve_location(&test_location()).await;
+        assert!(result.is_err());
+        // Factory called only once (initial build, no refresh for non-refreshable errors)
+        assert_eq!(call_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn test_refreshing_resolver_idle_refresh() {
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let addrs = test_addrs();
+
+        let call_count_clone = call_count.clone();
+        let addrs_clone = addrs.clone();
+        let factory: ResolverFactory = Arc::new(move || {
+            call_count_clone.fetch_add(1, Ordering::Relaxed);
+            let addrs = addrs_clone.clone();
+            Box::pin(
+                async move { Ok(Arc::new(MockResolver::with_addrs(addrs)) as Arc<dyn Resolver>) },
+            )
+        });
+
+        let policy = RefreshPolicy {
+            max_idle: Duration::from_millis(50),
+            retry_once_after_refresh: true,
+        };
+
+        let resolver = RefreshingResolver::new(factory, policy, "test".to_string())
+            .await
+            .unwrap();
+
+        // First resolve succeeds, sets last_success_at
+        let result = resolver.resolve_location(&test_location()).await.unwrap();
+        assert_eq!(result, addrs);
+        assert_eq!(call_count.load(Ordering::Relaxed), 1);
+
+        // Wait for idle timeout
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Second resolve triggers idle refresh
+        let result = resolver.resolve_location(&test_location()).await.unwrap();
+        assert_eq!(result, addrs);
+        // Factory called twice: initial + idle refresh
+        assert_eq!(call_count.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_addresses_returns_all() {
+        let addrs: Vec<SocketAddr> = vec![
+            "1.1.1.1:80".parse().unwrap(),
+            "2.2.2.2:80".parse().unwrap(),
+            "3.3.3.3:80".parse().unwrap(),
+        ];
+        let inner: Arc<dyn Resolver> = Arc::new(MockResolver::with_addrs(addrs.clone()));
+        let loc = test_location();
+
+        let result = resolve_addresses(&inner, &loc).await.unwrap();
+        assert_eq!(result, addrs);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_addresses_ip_literal() {
+        let inner: Arc<dyn Resolver> = Arc::new(MockResolver::with_addrs(vec![]));
+        let loc = NetLocation::new(Address::Ipv4("1.2.3.4".parse().unwrap()), 443);
+
+        let result = resolve_addresses(&inner, &loc).await.unwrap();
+        assert_eq!(result, vec!["1.2.3.4:443".parse::<SocketAddr>().unwrap()]);
+    }
+
+    #[tokio::test]
+    async fn test_timeout_resolver_ip_bypass() {
+        let inner = MockResolver::with_addrs(test_addrs());
+        let resolver = TimeoutResolver::with_timeout(inner, Duration::from_millis(1));
+
+        // IP literals should return immediately without timeout
+        let loc = NetLocation::new(Address::Ipv4("1.2.3.4".parse().unwrap()), 80);
+        let result = resolver.resolve_location(&loc).await.unwrap();
+        assert_eq!(result[0], "1.2.3.4:80".parse::<SocketAddr>().unwrap());
     }
 }

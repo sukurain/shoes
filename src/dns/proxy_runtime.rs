@@ -18,6 +18,7 @@ use crate::resolver::Resolver;
 use crate::socket_util::new_udp_socket;
 
 /// Default connection timeout for DNS server connections. Matches hickory-dns CONNECT_TIMEOUT.
+#[cfg(test)]
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// RuntimeProvider that routes TCP connections through a proxy chain.
@@ -32,13 +33,16 @@ pub struct ProxyRuntimeProvider {
     bind_interface: Option<String>,
     /// QUIC socket binder that uses the bind_interface.
     quic_binder: ProxyQuicBinder,
+    /// Timeout for establishing connections to DNS upstreams.
+    connect_timeout: Duration,
 }
 
 impl ProxyRuntimeProvider {
-    /// Create with the given chain group and bootstrap resolver.
+    /// Create with the given chain group, bootstrap resolver, and connect timeout.
     pub fn with_bootstrap(
         chain_group: Arc<ClientChainGroup>,
         bootstrap_resolver: Arc<dyn Resolver>,
+        connect_timeout: Duration,
     ) -> Self {
         let bind_interface = chain_group.get_bind_interface().map(ToString::to_string);
         let quic_binder = ProxyQuicBinder {
@@ -49,6 +53,7 @@ impl ProxyRuntimeProvider {
             bootstrap_resolver,
             bind_interface,
             quic_binder,
+            connect_timeout,
         }
     }
 }
@@ -84,7 +89,9 @@ impl RuntimeProvider for ProxyRuntimeProvider {
     ) -> Pin<Box<dyn Send + Future<Output = Result<Self::Tcp, io::Error>>>> {
         let chain_group = self.chain_group.clone();
         let resolver = self.bootstrap_resolver.clone();
-        let timeout = timeout.unwrap_or(DEFAULT_CONNECT_TIMEOUT);
+        let timeout = timeout
+            .map(|timeout| timeout.min(self.connect_timeout))
+            .unwrap_or(self.connect_timeout);
 
         Box::pin(async move {
             let address = match server_addr.ip() {
@@ -93,14 +100,39 @@ impl RuntimeProvider for ProxyRuntimeProvider {
             };
             let target = NetLocation::new(address, server_addr.port());
 
+            let started = std::time::Instant::now();
             let connect_future = chain_group.connect_tcp(target.into(), &resolver);
             match tokio::time::timeout(timeout, connect_future).await {
-                Ok(Ok(result)) => Ok(AsyncIoTokioAsStd(result.client_stream)),
-                Ok(Err(e)) => Err(e),
-                Err(_) => Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!("DNS server connection to {server_addr} timed out after {timeout:?}"),
-                )),
+                Ok(Ok(result)) => {
+                    log::debug!(
+                        "DNS upstream connect to {} succeeded in {:?}",
+                        server_addr,
+                        started.elapsed()
+                    );
+                    Ok(AsyncIoTokioAsStd(result.client_stream))
+                }
+                Ok(Err(e)) => {
+                    log::warn!(
+                        "DNS upstream connect to {} failed in {:?}: {}",
+                        server_addr,
+                        started.elapsed(),
+                        e
+                    );
+                    Err(e)
+                }
+                Err(_) => {
+                    log::warn!(
+                        "DNS upstream connect to {} timed out in {:?}",
+                        server_addr,
+                        started.elapsed()
+                    );
+                    Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!(
+                            "DNS server connection to {server_addr} timed out after {timeout:?}"
+                        ),
+                    ))
+                }
             }
         })
     }
@@ -183,7 +215,8 @@ mod tests {
         // RuntimeProvider requires Clone
         let resolver = Arc::new(NativeResolver::new());
         let chain_group = Arc::new(build_direct_chain_group(resolver.clone()));
-        let provider = ProxyRuntimeProvider::with_bootstrap(chain_group, resolver);
+        let provider =
+            ProxyRuntimeProvider::with_bootstrap(chain_group, resolver, DEFAULT_CONNECT_TIMEOUT);
         let _cloned = provider.clone();
     }
 
@@ -197,7 +230,8 @@ mod tests {
     async fn test_bind_udp_works_directly() {
         let resolver = Arc::new(NativeResolver::new());
         let chain_group = Arc::new(build_direct_chain_group(resolver.clone()));
-        let provider = ProxyRuntimeProvider::with_bootstrap(chain_group, resolver);
+        let provider =
+            ProxyRuntimeProvider::with_bootstrap(chain_group, resolver, DEFAULT_CONNECT_TIMEOUT);
 
         let local_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let server_addr: SocketAddr = "8.8.8.8:53".parse().unwrap();
@@ -217,7 +251,8 @@ mod tests {
         // Use localhost with a port that should be refused quickly.
         let resolver = Arc::new(NativeResolver::new());
         let chain_group = Arc::new(build_direct_chain_group(resolver.clone()));
-        let provider = ProxyRuntimeProvider::with_bootstrap(chain_group, resolver);
+        let provider =
+            ProxyRuntimeProvider::with_bootstrap(chain_group, resolver, DEFAULT_CONNECT_TIMEOUT);
 
         // Use localhost port 1 (reserved, should be refused quickly)
         let server_addr: SocketAddr = "127.0.0.1:1".parse().unwrap();
@@ -231,7 +266,8 @@ mod tests {
     fn test_create_handle() {
         let resolver = Arc::new(NativeResolver::new());
         let chain_group = Arc::new(build_direct_chain_group(resolver.clone()));
-        let provider = ProxyRuntimeProvider::with_bootstrap(chain_group, resolver);
+        let provider =
+            ProxyRuntimeProvider::with_bootstrap(chain_group, resolver, DEFAULT_CONNECT_TIMEOUT);
         let _handle = provider.create_handle();
     }
 
@@ -239,7 +275,8 @@ mod tests {
     fn test_quic_binder_available() {
         let resolver = Arc::new(NativeResolver::new());
         let chain_group = Arc::new(build_direct_chain_group(resolver.clone()));
-        let provider = ProxyRuntimeProvider::with_bootstrap(chain_group, resolver);
+        let provider =
+            ProxyRuntimeProvider::with_bootstrap(chain_group, resolver, DEFAULT_CONNECT_TIMEOUT);
         assert!(provider.quic_binder().is_some());
     }
 
@@ -247,7 +284,8 @@ mod tests {
     async fn test_connect_tcp_respects_timeout() {
         let resolver = Arc::new(NativeResolver::new());
         let chain_group = Arc::new(build_direct_chain_group(resolver.clone()));
-        let provider = ProxyRuntimeProvider::with_bootstrap(chain_group, resolver);
+        let provider =
+            ProxyRuntimeProvider::with_bootstrap(chain_group, resolver, DEFAULT_CONNECT_TIMEOUT);
 
         // Use an address that will hang (black hole) rather than refuse immediately.
         // 10.255.255.1 is a non-routable address that should cause the connection to hang.
@@ -278,10 +316,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_connect_tcp_caps_passed_timeout_by_configured_connect_timeout() {
+        let resolver = Arc::new(NativeResolver::new());
+        let chain_group = Arc::new(build_direct_chain_group(resolver.clone()));
+        let provider =
+            ProxyRuntimeProvider::with_bootstrap(chain_group, resolver, Duration::from_millis(100));
+
+        let server_addr: SocketAddr = "10.255.255.1:53".parse().unwrap();
+
+        let start = std::time::Instant::now();
+        let result = provider
+            .connect_tcp(server_addr, None, Some(Duration::from_secs(5)))
+            .await;
+        let elapsed = start.elapsed();
+
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("connection should fail"),
+        };
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "configured connect timeout should cap a longer request timeout, but took {:?}",
+            elapsed
+        );
+    }
+
+    #[tokio::test]
     async fn test_connect_tcp_uses_default_timeout_when_none() {
         let resolver = Arc::new(NativeResolver::new());
         let chain_group = Arc::new(build_direct_chain_group(resolver.clone()));
-        let provider = ProxyRuntimeProvider::with_bootstrap(chain_group, resolver);
+        let provider =
+            ProxyRuntimeProvider::with_bootstrap(chain_group, resolver, DEFAULT_CONNECT_TIMEOUT);
 
         // Use a black hole address
         let server_addr: SocketAddr = "10.255.255.1:53".parse().unwrap();
