@@ -65,7 +65,7 @@ impl InitialHopEntry {
     /// Returns true if this entry supports UDP.
     pub fn supports_udp(&self) -> bool {
         match self {
-            InitialHopEntry::Direct(_) => true, // Direct always supports UDP
+            InitialHopEntry::Direct(socket) => socket.supports_udp(),
             InitialHopEntry::Proxy { proxy, .. } => proxy.supports_udp_over_tcp(),
         }
     }
@@ -195,7 +195,7 @@ impl ClientProxyChain {
         }
         self.initial_hop
             .iter()
-            .all(|entry| matches!(entry, InitialHopEntry::Direct(_)))
+            .all(|entry| matches!(entry, InitialHopEntry::Direct(socket) if socket.is_native_direct()))
     }
 
     /// Returns the bind_interface from a direct-only chain.
