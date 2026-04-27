@@ -49,6 +49,7 @@ mod uuid_util;
 mod vless;
 mod vmess;
 mod websocket;
+mod wireguard;
 mod xudp;
 
 #[cfg(not(any(target_env = "msvc", target_os = "ios")))]
