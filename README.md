@@ -1,306 +1,357 @@
-# shoes
+# Changelog
 
-shoes is a high-performance multi-protocol proxy server written in Rust.
+## v0.2.8
 
-## Supported Protocols
+### New Features
 
-### Proxy Protocols
-- **HTTP/HTTPS**
-- **SOCKS5** (with UDP ASSOCIATE)
-- **Mixed** (auto-detect HTTP/SOCKS5)
-- **VMess AEAD**
-- **VLESS** (with fallback support)
-- **Shadowsocks**
-- **Trojan**
-- **Snell v3**
-- **Hysteria2**
-- **TUIC v5**
-- **AnyTLS**
-- **NaiveProxy**
-- **H2MUX** (supported with VMess, VLESS, Trojan, Shadowsocks, Snell)
-- **WireGuard** (client/outbound only, supports WARP-style peers)
+#### WireGuard Client Outbound
 
-### Transport Protocols
-All server protocols plus:
-- **SagerNet UDP over TCP** (for Shadowsocks, SOCKS5, AnyTLS, NaiveProxy)
-- **ShadowTLS v3**
-- **TLS**
-- **WebSocket** (Shadowsocks SIP003)
-- **XTLS Reality**
-- **XTLS Vision** (for VLESS)
+Added socket-level WireGuard outbound support for routing selected traffic through WireGuard peers, including Cloudflare WARP-style configurations.
 
-### TUN/VPN Mode
-- **TUN device support** - Layer 3 VPN for transparent proxying
-- Supported platforms: Linux, Android, iOS
-
-### Supported Ciphers
-- **VMess**: `aes-128-gcm`, `chacha20-poly1305`, `none`
-- **Shadowsocks**: `aes-128-gcm`, `aes-256-gcm`, `chacha20-ietf-poly1305`, `2022-blake3-aes-128-gcm`, `2022-blake3-aes-256-gcm`, `2022-blake3-chacha20-ietf-poly1305`
-- **Snell v3**: `aes-128-gcm`, `aes-256-gcm`, `chacha20-ietf-poly1305`
-
-## Features
-
-- **Multi-transport**: TCP or QUIC for all protocols
-- **TLS with SNI routing**: Route by Server Name Indication
-- **Upstream proxy chaining**: Multi-hop chains with load balancing
-- **Rule-based routing**: Route by IP/CIDR or hostname masks
-- **WireGuard outbound routing**: Route selected traffic through WireGuard peers
-- **Named PEM certificates**: Define once, reference everywhere
-- **TLS fingerprint authentication**: Certificate pinning for TLS/QUIC
-- **Hot reloading**: Apply config changes without restart
-- **Unix socket support**: Bind to Unix domain sockets
-
-For advanced access control (IP allowlist/blocklists), see [tobaru](https://github.com/cfal/tobaru).
-
-## Installation
-
-Precompiled binaries for x86_64 and Apple aarch64 are available on [Github Releases](https://github.com/cfal/shoes/releases).
-
-Or install with cargo:
-
-```bash
-cargo install shoes
-```
-
-## Usage
-
-```
-shoes [OPTIONS] <config.yaml> [config.yaml...]
-
-OPTIONS:
-    -t, --threads NUM    Set the number of worker threads (default: CPU count)
-    -d, --dry-run        Parse the config and exit
-    --no-reload          Disable automatic config reloading on file changes
-
-COMMANDS:
-    generate-reality-keypair                  Generate a new Reality X25519 keypair
-    generate-shadowsocks-2022-password <cipher>    Generate a Shadowsocks password
-```
-
-### Examples
-```bash
-# Run with a single config file
-shoes config.yaml
-
-# Run with multiple config files
-shoes server1.yaml server2.yaml rules.yaml
-
-# Run with custom thread count
-shoes --threads 8 config.yaml
-
-# Validate configuration without starting
-shoes --dry-run config.yaml
-
-# Run without hot-reloading
-shoes --no-reload config.yaml
-
-# Generate Reality keypair
-shoes generate-reality-keypair
-
-# Generate Shadowsocks 2022 cipher password
-shoes generate-shadowsocks-2022-password 2022-blake3-aes-256-gcm
-```
-
-## Configuration
-
-See [CONFIG.md](./CONFIG.md) for the complete YAML configuration reference.
-
-## Examples
-
-See the [examples](./examples) directory for all examples.
-
-### Basic VMess Server
 ```yaml
-- address: 0.0.0.0:16823
+client_chain:
   protocol:
-    type: vmess
-    cipher: chacha20-poly1305
-    user_id: b0e80a62-8a51-47f0-91f1-f0f7faf8d9d4
-    udp_enabled: true
+    type: wireguard
+    private-key: "YOUR_BASE64_PRIVATE_KEY"
+    server: 162.159.193.5
+    port: 4500
+    ip: 172.16.0.2
+    ipv6: 2606:4700:cf1:1000::1
+    public-key: "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
+    allowed-ips: ["0.0.0.0/0", "::/0"]
+    udp: true
+    mtu: 1408
+    ip-version: ipv6-prefer
+    remote-dns-resolve: true
+    dns: ["2606:4700:4700::1111"]
 ```
 
-### VLESS with Vision over TLS
+Supported WireGuard options include `private-key`, `public-key`, `pre-shared-key`, `server`, `port`, `ip`, `ipv6`, `allowed-ips`, `udp`, `mtu`, `ip-version`, `remote-dns-resolve`, `dns`, and `reserved`.
+
+### Improvements
+
+- Added bounded queues and packet buffer reuse in the WireGuard runtime to avoid unbounded memory growth under load.
+- Added remote DNS caching for WireGuard outbound hostname resolution.
+- Enforced WireGuard `allowed-ips` at runtime when selecting usable target addresses.
+- Added indexed hostname rule matching for faster routing decisions on large hostname rule sets.
+- Added a local BoringTun patch for non-zero WireGuard `reserved` bytes used by WARP-style peers.
+
+## v0.2.7
+
+### Improvements
+
+#### H2MUX Stability
+- Added connection-level activity tracking that counts HTTP/2 control frames (PING, SETTINGS) as activity, ensuring keepalives properly reset idle detection
+- Removed application-level idle timeout in favor of PING-based dead connection detection, matching sing-mux behavior for better compatibility
+- Added drain timeout for graceful session shutdown
+- Updated window sizes to match Go http2 defaults (256KB per stream, 1MB per connection)
+
+#### AnyTLS Memory Leak Fixes
+- Stream handler tasks are now tracked and aborted when session closes, preventing memory leaks from orphaned tasks
+- Added 5-minute stream handler timeout to prevent hung streams (slow DNS, stuck connections) from leaking memory
+- Reduced allocations in padding frame generation
+
+#### TUN Connection Tracking
+- Refactored TCP connection state machine with explicit states (Normal, Close, Closing, Closed) for proper lifecycle management
+- Improved connection teardown handling following shadowsocks-rust patterns
+
+## v0.2.6
+
+### New Features
+
+#### H2MUX (sing-box Compatible HTTP/2 Multiplexing)
+
+H2MUX multiplexes multiple proxy streams over a single HTTP/2 connection, reducing connection overhead and improving performance for many concurrent streams. This is compatible with sing-box's h2mux implementation.
+
+**Client configuration (VMess, VLESS, Trojan):**
 ```yaml
-- address: 0.0.0.0:443
+client_chain:
+  address: "example.com:443"
   protocol:
     type: tls
-    tls_targets:
-      "vless.example.com":
-        cert: cert.pem
-        key: key.pem
-        vision: true
-        alpn_protocols: ["http/1.1"]
-        protocol:
-          type: vless
-          user_id: b85798ef-e9dc-46a4-9a87-8da4499d36d0
-          udp_enabled: true
+    protocol:
+      type: vmess
+      cipher: aes-128-gcm
+      user_id: "uuid"
+      h2mux:
+        max_connections: 4    # Maximum connections to maintain
+        min_streams: 4        # Min streams before opening new connection
+        max_streams: 0        # Max streams per connection (0 = unlimited)
+        padding: true         # Enable padding for traffic obfuscation
 ```
 
-### Reality Server
+**Server support:** H2MUX is auto-detected on the server side for VMess, VLESS, Trojan, Shadowsocks, and Snell protocols. No server configuration changes are needed.
+
+#### H2MUX Client Compatibility
+
+The Go H2MUX library contained a bug that prevents data upload from finishing successfully, see [https://github.com/SagerNet/sing-mux/pull/8](https://github.com/SagerNet/sing-mux/pull/8)
+
+sing-box now contains this fix, but other clients (eg mihomo) that depend on sing-mux without this change can have issues.
+
+#### DNS Resolution Timeout
+
+DNS servers now support a configurable timeout to prevent hanging on unresponsive DNS servers.
+
 ```yaml
-- address: 0.0.0.0:443
+- dns_group: my-dns
+  servers:
+    - url: "tls://dns.example.com"
+      timeout_secs: 10      # Default: 5. Set to 0 to disable.
+```
+
+### Improvements
+
+- **DNS connection timeout**: DNS-over-TLS/HTTPS connections now respect a 5-second connection timeout, preventing hangs when DNS servers are unreachable
+- **Reality server**: Improved shutdown handling with proper flush after every forward operation
+
+## v0.2.5
+
+### New Features
+
+#### AnyTLS Protocol
+
+**Server:**
+```yaml
+protocol:
+  type: tls
+  tls_targets:
+    "example.com":
+      cert: cert.pem
+      key: key.pem
+      protocol:
+        type: anytls
+        users:
+          - name: user1
+            password: secret123
+        udp_enabled: true
+        padding_scheme: ["stop=8", "0=30-30"]  # Optional custom padding
+        fallback: "127.0.0.1:80"               # Optional fallback
+```
+
+**Client:**
+```yaml
+client_chain:
+  address: "example.com:443"
   protocol:
     type: tls
-    reality_targets:
-      "www.example.com":
-        private_key: "YOUR_BASE64URL_PRIVATE_KEY"
-        short_ids: ["0123456789abcdef", ""]
-        dest: "www.example.com:443"
-        protocol:
-          type: vless
-          user_id: b85798ef-e9dc-46a4-9a87-8da4499d36d0
-          udp_enabled: true
+    protocol:
+      type: anytls
+      password: secret123
 ```
 
-### Reality Client
+#### NaiveProxy Protocol
+
+**Server:**
 ```yaml
-- address: 127.0.0.1:1080
+protocol:
+  type: tls
+  tls_targets:
+    "example.com":
+      cert: cert.pem
+      key: key.pem
+      alpn_protocols: ["h2"]
+      protocol:
+        type: naiveproxy
+        users:
+          - username: user1
+            password: secret123
+        padding: true
+        fallback: "/var/www/html"  # Optional static file fallback
+```
+
+**Client:**
+```yaml
+client_chain:
+  address: "example.com:443"
   protocol:
-    type: socks
-  rules:
-    - masks: "0.0.0.0/0"
-      action: allow
-      client_chain:
-        address: "server.example.com:443"
-        protocol:
-          type: reality
-          public_key: "SERVER_PUBLIC_KEY"
-          short_id: "0123456789abcdef"
-          sni_hostname: "www.example.com"
-          protocol:
-            type: vless
-            user_id: b85798ef-e9dc-46a4-9a87-8da4499d36d0
+    type: tls
+    alpn_protocols: ["h2"]
+    protocol:
+      type: naiveproxy
+      username: user1
+      password: secret123
 ```
 
-### WireGuard Outbound
-```yaml
-- client_group: warp
-  client_proxies:
-    - protocol:
-        type: wireguard
-        private-key: "YOUR_BASE64_PRIVATE_KEY"
-        server: 162.159.193.5
-        port: 4500
-        ip: 172.16.0.2
-        ipv6: 2606:4700:cf1:1000::1
-        public-key: "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
-        allowed-ips: ["0.0.0.0/0", "::/0"]
-        udp: true
-        mtu: 1408
-        ip-version: ipv6-prefer
-        remote-dns-resolve: true
-        dns: ["2606:4700:4700::1111"]
+#### Mixed Port (HTTP + SOCKS5)
+Auto-detects HTTP or SOCKS5 protocol.
 
-- address: 127.0.0.1:1080
-  protocol:
-    type: socks
-    udp_enabled: true
-  rules:
-    - masks: ["youtube.com", "googlevideo.com"]
-      action: allow
-      client_chain: warp
-    - masks: ["0.0.0.0/0", "::/0"]
-      action: allow
-      client_chain: direct
-```
-
-### Hysteria2 Server
 ```yaml
-- address: 0.0.0.0:443
-  transport: quic
-  quic_settings:
-    cert: cert.pem
-    key: key.pem
-    alpn_protocols: ["h3"]
-  protocol:
-    type: hysteria2
-    password: supersecret
-    udp_enabled: true
-```
-
-### TUIC v5 Server
-```yaml
-- address: 0.0.0.0:443
-  transport: quic
-  quic_settings:
-    cert: cert.pem
-    key: key.pem
-  protocol:
-    type: tuic
-    uuid: d685aef3-b3c4-4932-9a9d-d0c2f6727dfa
-    password: supersecret
-```
-
-### Mixed HTTP/SOCKS5 Server
-```yaml
-- address: 0.0.0.0:7890
+- address: "0.0.0.0:7890"
   protocol:
     type: mixed
-    username: myuser
-    password: mypassword
+    username: user
+    password: pass
+    udp_enabled: true  # Enable SOCKS5 UDP ASSOCIATE
 ```
 
-### AnyTLS Server
-```yaml
-- address: 0.0.0.0:443
-  protocol:
-    type: tls
-    tls_targets:
-      "anytls.example.com":
-        cert: cert.pem
-        key: key.pem
-        protocol:
-          type: anytls
-          users:
-            - name: user1
-              password: secret123
-          udp_enabled: true
-```
+#### TUN/VPN Support
+Layer 3 VPN mode using TUN devices for transparent proxying. Supports Linux, Android, and iOS.
 
-### NaiveProxy Server
 ```yaml
-- address: 0.0.0.0:443
-  protocol:
-    type: tls
-    tls_targets:
-      "naive.example.com":
-        cert: cert.pem
-        key: key.pem
-        alpn_protocols: ["h2"]
-        protocol:
-          type: naiveproxy
-          users:
-            - username: user1
-              password: secret123
-          padding: true
-```
-
-### TUN VPN
-```yaml
-- device_name: tun0
-  address: 10.0.0.1
-  netmask: 255.255.255.0
+- device_name: "tun0"
+  address: "10.0.0.1"
+  netmask: "255.255.255.0"
   mtu: 1500
   tcp_enabled: true
   udp_enabled: true
+  icmp_enabled: true
   rules:
     - masks: "0.0.0.0/0"
       action: allow
       client_chain:
         address: "proxy.example.com:443"
         protocol:
-          type: tls
-          protocol:
-            type: vless
-            user_id: b85798ef-e9dc-46a4-9a87-8da4499d36d0
+          type: vless
+          user_id: "uuid"
 ```
 
-## Similar Projects
+**Platform support:**
+- Linux: Creates TUN device with specified name/address (requires root)
+- Android: Use `device_fd` from `VpnService.Builder.establish()`
+- iOS: Use `device_fd` from `NEPacketTunnelProvider.packetFlow`
 
-- [apernet/hysteria](https://github.com/apernet/hysteria)
-- [ihciah/shadow-tls](https://github.com/ihciah/shadow-tls)
-- [SagerNet/sing-box](https://github.com/SagerNet/sing-box)
-- [shadowsocks/shadowsocks-rust](https://github.com/shadowsocks/shadowsocks-rust)
-- [EAimTY/tuic](https://github.com/EAimTY/tuic)
-- [v2fly/v2ray-core](https://github.com/v2fly/v2ray-core)
-- [XTLS/Xray-core](https://github.com/XTLS/Xray-core)
+#### SOCKS5 UDP ASSOCIATE
+Full UDP support for SOCKS5 servers including UDP ASSOCIATE command. Enable with `udp_enabled: true` (default).
+
+```yaml
+protocol:
+  type: socks
+  udp_enabled: true  # Default: true
+```
+
+#### VLESS Fallback
+Route failed authentication attempts to a fallback destination instead of rejecting them.
+
+```yaml
+protocol:
+  type: vless
+  user_id: "uuid"
+  fallback: "127.0.0.1:80"  # Serve web content for invalid clients
+```
+
+#### Reality `dest_client_chain`
+Route Reality fallback (dest) connections through a proxy chain.
+
+```yaml
+reality_targets:
+  "www.example.com":
+    private_key: "..."
+    dest: "www.example.com:443"
+    dest_client_chain:
+      address: "proxy.example.com:1080"
+      protocol:
+        type: socks
+    protocol:
+      type: vless
+      user_id: "uuid"
+```
+
+### Improvements
+
+- **UDP routing**: Comprehensive rewrite of UDP session routing with better multiplexing support
+- **Reality**: Improved active probing resistance with TLS 1.3 verification
+- **Performance**: Optimized buffer handling and reduced allocations
+- **QUIC**: Better buffer sizing based on quic-go recommendations
+
+### Mobile Support
+
+- **iOS FFI**: Added iOS bindings via `NEPacketTunnelProvider` integration
+- **Android FFI**: Added Android bindings via `VpnService` integration
+- Library now builds as `rlib`, `cdylib`, and `staticlib` for mobile embedding
+
+---
+
+## v0.2.1
+
+## New Features
+
+### Client Chaining (`client_chains`)
+Multi-hop proxy chains with load balancing support. Traffic can now be routed through multiple proxies in sequence.
+
+- **Multi-hop chains**: Route traffic through multiple proxies sequentially (e.g., `proxy1 -> proxy2 -> target`)
+- **Round-robin chains**: Specify multiple chains and rotate between them for load distribution
+- **Pool-based load balancing**: At each hop, use a pool of proxies for load balancing
+- New config fields: `client_chain` (singular) and `client_chains` (multiple)
+- See `examples/multi_hop_chain.yaml` for usage examples
+
+### TUIC v5 Zero-RTT Handshake
+New `zero_rtt_handshake` option for TUIC v5 servers enables 0-RTT (0.5-RTT for server) handshakes for faster connection establishment.
+
+```yaml
+protocol:
+  type: tuic
+  uuid: "..."
+  password: "..."
+  zero_rtt_handshake: true  # Default: false
+```
+
+Note: 0-RTT is vulnerable to replay attacks. Only enable if the latency benefit outweighs security concerns.
+
+### Reality Cipher Suites
+Both Reality server and client now support specifying TLS 1.3 cipher suites.
+
+```yaml
+# Server
+reality_targets:
+  "example.com":
+    cipher_suites: ["TLS_AES_256_GCM_SHA384", "TLS_CHACHA20_POLY1305_SHA256"]
+    ...
+
+# Client
+protocol:
+  type: reality
+  cipher_suites: ["TLS_AES_256_GCM_SHA384"]
+  ...
+```
+
+Valid values: `TLS_AES_128_GCM_SHA256`, `TLS_AES_256_GCM_SHA384`, `TLS_CHACHA20_POLY1305_SHA256`
+
+### Reality Client Version Control
+Server-side Reality configuration can now restrict client versions:
+
+```yaml
+reality_targets:
+  "example.com":
+    min_client_version: [1, 8, 0]  # [major, minor, patch]
+    max_client_version: [2, 0, 0]
+    ...
+```
+
+## Deprecations
+
+### `client_proxy` / `client_proxies` in Rules
+The `client_proxy` and `client_proxies` fields in rule configurations are deprecated in favor of `client_chain` and `client_chains`.
+
+**Migration**: Replace `client_proxy:` with `client_chain:` in your configuration files. The old fields still work but will emit a warning and may be removed in a future version.
+
+Before:
+```yaml
+rules:
+  - masks: "0.0.0.0/0"
+    action: allow
+    client_proxy: my-proxy-group
+```
+
+After:
+```yaml
+rules:
+  - masks: "0.0.0.0/0"
+    action: allow
+    client_chain: my-proxy-group
+```
+
+### VMess `force_aead` / `aead` Fields
+The `force_aead` and `aead` fields in VMess configuration are deprecated. AEAD mode is now always enabled, and non-AEAD (legacy) mode is no longer supported.
+
+**Migration**: Remove `force_aead` and `aead` fields from your VMess configurations. They have no effect and will be ignored.
+
+## Removed / Breaking Changes
+
+### VMess Non-AEAD Mode Removed
+VMess non-AEAD (legacy) mode is no longer supported. All VMess connections now use AEAD encryption exclusively. This improves security but breaks compatibility with very old VMess clients that don't support AEAD.
+
+## Other Changes
+
+- Hysteria2 and TUIC servers now have authentication timeouts (3 seconds by default) to prevent connection hogging
+- Improved fragment packet handling with LRU cache eviction
+- TUIC server now sends heartbeat packets to maintain connection liveness
