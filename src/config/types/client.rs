@@ -1,6 +1,7 @@
 //! Client configuration types.
 
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use serde::{Deserialize, Serialize};
 
@@ -274,6 +275,93 @@ where
     deserialize_tls_client_config(deserializer)
 }
 
+fn default_wireguard_allowed_ips() -> Vec<String> {
+    vec!["0.0.0.0/0".to_string()]
+}
+
+fn default_wireguard_mtu() -> u16 {
+    1420
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WireGuardIpVersion {
+    Ipv4Only,
+    Ipv6Only,
+    #[default]
+    Ipv4Prefer,
+    Ipv6Prefer,
+}
+
+impl WireGuardIpVersion {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn allow_ipv4(&self) -> bool {
+        !matches!(self, Self::Ipv6Only)
+    }
+
+    pub fn allow_ipv6(&self) -> bool {
+        !matches!(self, Self::Ipv4Only)
+    }
+
+    pub fn prefer_ipv6(&self) -> bool {
+        matches!(self, Self::Ipv6Only | Self::Ipv6Prefer)
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WireGuardClientConfig {
+    #[serde(rename = "private-key", alias = "private_key")]
+    pub private_key: String,
+    pub server: String,
+    pub port: u16,
+    pub ip: Ipv4Addr,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipv6: Option<Ipv6Addr>,
+    #[serde(rename = "public-key", alias = "public_key")]
+    pub public_key: String,
+    #[serde(
+        rename = "pre-shared-key",
+        alias = "pre_shared_key",
+        alias = "preshared-key",
+        alias = "preshared_key",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub pre_shared_key: Option<String>,
+    #[serde(
+        rename = "allowed-ips",
+        alias = "allowed_ips",
+        default = "default_wireguard_allowed_ips"
+    )]
+    pub allowed_ips: Vec<String>,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub udp: bool,
+    #[serde(default = "default_wireguard_mtu")]
+    pub mtu: u16,
+    #[serde(
+        rename = "ip-version",
+        alias = "ip_version",
+        default,
+        skip_serializing_if = "WireGuardIpVersion::is_default"
+    )]
+    pub ip_version: WireGuardIpVersion,
+    #[serde(
+        rename = "remote-dns-resolve",
+        alias = "remote_dns_resolve",
+        default,
+        skip_serializing_if = "is_false"
+    )]
+    pub remote_dns_resolve: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dns: Vec<IpAddr>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reserved: Option<Vec<u8>>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClientConfig {
@@ -310,6 +398,8 @@ impl Default for ClientConfig {
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum ClientProxyConfig {
     Direct,
+    #[serde(alias = "wg")]
+    Wireguard(WireGuardClientConfig),
     Http {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         username: Option<String>,
@@ -442,10 +532,15 @@ impl ClientProxyConfig {
         matches!(self, ClientProxyConfig::Direct)
     }
 
+    pub fn is_socket_only(&self) -> bool {
+        matches!(self, ClientProxyConfig::Direct | ClientProxyConfig::Wireguard(_))
+    }
+
     /// Returns the protocol name for display/error messages
     pub fn protocol_name(&self) -> &str {
         match self {
             ClientProxyConfig::Direct => "Direct",
+            ClientProxyConfig::Wireguard(_) => "WireGuard",
             ClientProxyConfig::Http { .. } => "HTTP",
             ClientProxyConfig::Socks { .. } => "SOCKS5",
             ClientProxyConfig::Shadowsocks { .. } => "Shadowsocks",
