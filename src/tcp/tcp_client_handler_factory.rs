@@ -48,6 +48,9 @@ pub fn create_tcp_client_handler(
         ClientProxyConfig::Direct => {
             panic!("Tried to create a direct tcp client handler");
         }
+        ClientProxyConfig::Wireguard(_) => {
+            panic!("Tried to create a WireGuard tcp client handler");
+        }
         ClientProxyConfig::Http {
             username,
             password,
