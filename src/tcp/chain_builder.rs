@@ -15,7 +15,7 @@ use crate::tcp::socket_connector_impl::SocketConnectorImpl;
 ///
 /// Creates InitialHopEntry (socket + optional proxy paired) from hop 0.
 /// Creates ProxyConnectors for subsequent hops (1+).
-/// `protocol: direct` at hop 0 creates InitialHopEntry::Direct.
+/// Socket-only protocols at hop 0 create InitialHopEntry::Direct.
 pub fn build_client_proxy_chain(
     client_chain: crate::option_util::OneOrSome<ClientChainHop>,
     resolver: Arc<dyn Resolver>,
@@ -65,8 +65,8 @@ pub fn build_client_proxy_chain(
                 .map(|s| Box::new(s) as Box<dyn SocketConnector>)
                 .expect("Failed to create SocketConnector");
 
-            if config.protocol.is_direct() {
-                // Direct: socket only, no proxy
+            if config.protocol.is_socket_only() {
+                // Socket-only: socket creates the outbound connection, no proxy protocol setup
                 InitialHopEntry::Direct(socket)
             } else {
                 // Proxy: socket + proxy paired
@@ -88,10 +88,11 @@ pub fn build_client_proxy_chain(
             hop_configs
                 .into_iter()
                 .map(|config| {
-                    // Subsequent hops MUST NOT have direct protocol
-                    if config.protocol.is_direct() {
+                    // Subsequent hops MUST NOT have socket-only protocols
+                    if config.protocol.is_socket_only() {
                         panic!(
-                            "protocol: direct is only valid at hop 0. Found direct at hop {} with address {}",
+                            "protocol: {} is only valid at hop 0. Found it at hop {} with address {}",
+                            config.protocol.protocol_name(),
                             hop_index,
                             config.address
                         );
@@ -114,14 +115,14 @@ fn find_first_proxy_address<'a>(
     current_config: &'a ClientConfig,
 ) -> Option<&'a crate::address::NetLocation> {
     // If current config is a proxy, use its address
-    if !current_config.protocol.is_direct() {
+    if !current_config.protocol.is_socket_only() {
         return Some(&current_config.address);
     }
 
     // Otherwise, look at subsequent hops
     for hop in hops.iter().skip(1) {
         for config in hop {
-            if !config.protocol.is_direct() {
+            if !config.protocol.is_socket_only() {
                 return Some(&config.address);
             }
         }
