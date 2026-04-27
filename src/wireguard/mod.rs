@@ -383,7 +383,7 @@ impl WireGuardInner {
         }
         let network_packet = {
             let mut peer = self.peer.lock().await;
-            match peer.encapsulate(packet, &mut send_buf) {
+            match peer.encapsulate(packet, send_buf.as_mut_slice()) {
                 TunnResult::WriteToNetwork(packet) => Some(Bytes::copy_from_slice(packet)),
                 TunnResult::Done => None,
                 TunnResult::Err(err) => {
