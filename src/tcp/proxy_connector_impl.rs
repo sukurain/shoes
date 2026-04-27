@@ -33,9 +33,9 @@ pub struct ProxyConnectorImpl {
 impl ProxyConnectorImpl {
     /// Create a ProxyConnector from a ClientConfig's protocol-related fields.
     ///
-    /// Returns None for direct protocol (direct has no ProxyConnector).
+    /// Returns None for socket-only protocols (they have no ProxyConnector).
     pub fn from_config(config: ClientConfig, resolver: Arc<dyn Resolver>) -> Option<Self> {
-        if config.protocol.is_direct() {
+        if config.protocol.is_socket_only() {
             return None;
         }
 
