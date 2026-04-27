@@ -17,11 +17,13 @@ use tokio::net::UdpSocket;
 use crate::address::{NetLocation, ResolvedLocation};
 use crate::async_stream::AsyncStream;
 use crate::config::{ClientConfig, ClientQuicConfig, Transport};
+use crate::config::ClientProxyConfig;
 use crate::quic_stream::QuicStream;
 use crate::resolver::{Resolver, resolve_addresses, resolve_location};
 use crate::rustls_config_util::create_client_config;
 use crate::socket_util::{new_tcp_socket, new_udp_socket, set_tcp_keepalive};
 use crate::thread_util::get_num_threads;
+use crate::wireguard::WireGuardSocketConnector;
 
 use super::socket_connector::SocketConnector;
 
@@ -50,6 +52,7 @@ enum TransportConfig {
 pub struct SocketConnectorImpl {
     bind_interface: Option<String>,
     transport: TransportConfig,
+    wireguard: Option<WireGuardSocketConnector>,
 }
 
 impl SocketConnectorImpl {
@@ -70,6 +73,17 @@ impl SocketConnectorImpl {
 
         let default_sni_hostname =
             target_address.and_then(|addr| addr.address().hostname().map(ToString::to_string));
+
+        if let ClientProxyConfig::Wireguard(wireguard_config) = &config.protocol {
+            return Some(Self {
+                bind_interface: bind_interface.clone(),
+                transport: TransportConfig::Tcp { no_delay: true },
+                wireguard: Some(WireGuardSocketConnector::new(
+                    wireguard_config.clone(),
+                    bind_interface,
+                )),
+            });
+        }
 
         // Direct protocol only supports TCP (no proxy server to connect via QUIC)
         let effective_transport = if config.protocol.is_direct() {
@@ -193,6 +207,7 @@ impl SocketConnectorImpl {
         Some(Self {
             bind_interface,
             transport,
+            wireguard: None,
         })
     }
 
@@ -204,6 +219,7 @@ impl SocketConnectorImpl {
         Self {
             bind_interface,
             transport: TransportConfig::Tcp { no_delay },
+            wireguard: None,
         }
     }
 }
@@ -215,6 +231,10 @@ impl SocketConnector for SocketConnectorImpl {
         resolver: &Arc<dyn Resolver>,
         address: &ResolvedLocation,
     ) -> std::io::Result<Box<dyn AsyncStream>> {
+        if let Some(wireguard) = &self.wireguard {
+            return wireguard.connect(resolver, address).await;
+        }
+
         let target_addrs = match address.resolved_addr() {
             Some(r) => vec![r],
             None => resolve_addresses(resolver, address.location()).await?,
@@ -319,6 +339,10 @@ impl SocketConnector for SocketConnectorImpl {
         resolver: &Arc<dyn Resolver>,
         mut target: ResolvedLocation,
     ) -> std::io::Result<Box<dyn crate::async_stream::AsyncMessageStream>> {
+        if let Some(wireguard) = &self.wireguard {
+            return wireguard.connect_udp_bidirectional(resolver, target).await;
+        }
+
         debug!(
             "[SocketConnector] connect_udp_bidirectional called, target: {}",
             target.location()
@@ -338,7 +362,21 @@ impl SocketConnector for SocketConnectorImpl {
     }
 
     fn bind_interface(&self) -> Option<&str> {
-        self.bind_interface.as_deref()
+        self.wireguard
+            .as_ref()
+            .and_then(|wireguard| wireguard.bind_interface())
+            .or(self.bind_interface.as_deref())
+    }
+
+    fn is_native_direct(&self) -> bool {
+        self.wireguard.is_none()
+    }
+
+    fn supports_udp(&self) -> bool {
+        self.wireguard
+            .as_ref()
+            .map(WireGuardSocketConnector::supports_udp)
+            .unwrap_or(true)
     }
 }
 
