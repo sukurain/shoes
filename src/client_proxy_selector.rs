@@ -1,6 +1,7 @@
 use log::{debug, error};
 use lru::LruCache;
 use parking_lot::RwLock;
+use std::collections::HashMap;
 use std::hash::Hash;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::num::NonZeroUsize;
@@ -186,10 +187,10 @@ impl ConnectAction {
 /// If rule count exceeds this value, caching is enabled even without DNS resolution.
 const CACHE_RULE_THRESHOLD: usize = 16;
 
-// TODO: Replace linear rule matching with radix set/trie
 #[derive(Debug)]
 pub struct ClientProxySelector {
     rules: Vec<ConnectRule>,
+    hostname_index: HostnameRuleIndex,
     /// If false, hostname rules will not trigger DNS resolution to match against IP-based
     /// destinations. This is useful when a huge blocklist or rule list is provided.
     /// However, this means that the user needs to make sure DNS resolutions are not done
@@ -261,9 +262,11 @@ impl ClientProxySelector {
         } else {
             None
         };
+        let hostname_index = HostnameRuleIndex::build(&rules);
 
         Self {
             rules,
+            hostname_index,
             resolve_rule_hostnames,
             cache,
         }
@@ -304,8 +307,9 @@ impl ClientProxySelector {
 
         // Slow path: full rule matching (may resolve and update the location)
         let mut location = location;
-        match match_rule(
+        match match_rule_indexed(
             &self.rules,
+            &self.hostname_index,
             &mut location,
             resolved_ip,
             resolver,
@@ -335,8 +339,9 @@ impl ClientProxySelector {
         resolver: &Arc<dyn Resolver>,
     ) -> std::io::Result<ConnectDecision<'a>> {
         let mut location = location;
-        match match_rule(
+        match match_rule_indexed(
             &self.rules,
+            &self.hostname_index,
             &mut location,
             resolved_ip,
             resolver,
@@ -382,6 +387,85 @@ impl ClientProxySelector {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct HostnameRuleKey {
+    hostname: String,
+    port: u16,
+}
+
+#[derive(Debug, Default)]
+struct HostnameRuleIndex {
+    hostname_rules: HashMap<HostnameRuleKey, usize>,
+    non_hostname_rule_indices: Vec<usize>,
+}
+
+impl HostnameRuleIndex {
+    fn build(rules: &[ConnectRule]) -> Self {
+        let mut hostname_rules: HashMap<HostnameRuleKey, usize> = HashMap::new();
+        let mut non_hostname_rule_indices = Vec::new();
+
+        for (rule_index, rule) in rules.iter().enumerate() {
+            let mut has_non_hostname_mask = false;
+            for mask in &rule.masks {
+                match &mask.address_mask.address {
+                    Address::Hostname(hostname) => {
+                        let key = HostnameRuleKey {
+                            hostname: hostname.clone(),
+                            port: mask.port,
+                        };
+                        hostname_rules
+                            .entry(key)
+                            .and_modify(|existing| *existing = (*existing).min(rule_index))
+                            .or_insert(rule_index);
+                    }
+                    _ => has_non_hostname_mask = true,
+                }
+            }
+
+            if has_non_hostname_mask {
+                non_hostname_rule_indices.push(rule_index);
+            }
+        }
+
+        Self {
+            hostname_rules,
+            non_hostname_rule_indices,
+        }
+    }
+
+    fn find_hostname_candidate(&self, hostname: &str, port: u16) -> Option<usize> {
+        let mut best: Option<usize> = None;
+        let mut suffix = hostname;
+        loop {
+            self.update_best(suffix, port, &mut best);
+            self.update_best(suffix, 0, &mut best);
+
+            let Some(dot_index) = suffix.find('.') else {
+                break;
+            };
+            suffix = &suffix[dot_index + 1..];
+        }
+        best
+    }
+
+    fn update_best(&self, hostname: &str, port: u16, best: &mut Option<usize>) {
+        let key = HostnameRuleKey {
+            hostname: hostname.to_string(),
+            port,
+        };
+        if let Some(rule_index) = self.hostname_rules.get(&key) {
+            *best = Some(best.map_or(*rule_index, |existing| existing.min(*rule_index)));
+        }
+    }
+
+    fn non_hostname_indices_through(&self, limit: usize) -> impl Iterator<Item = usize> + '_ {
+        self.non_hostname_rule_indices
+            .iter()
+            .copied()
+            .take_while(move |rule_index| *rule_index <= limit)
+    }
+}
+
 #[inline]
 fn ip_to_u128(ip: IpAddr) -> u128 {
     match ip {
@@ -419,6 +503,55 @@ fn matches_domain(base_domain: &str, hostname: &str) -> bool {
 /// Returns the index of the matching rule.
 /// During matching, may resolve the location's address and cache it in `location`.
 #[inline]
+async fn match_rule_indexed(
+    rules: &[ConnectRule],
+    hostname_index: &HostnameRuleIndex,
+    location: &mut ResolvedLocation,
+    resolved_ip: Option<u128>,
+    resolver: &Arc<dyn Resolver>,
+    resolve_rule_hostnames: bool,
+) -> std::io::Result<Option<usize>> {
+    if let Address::Hostname(hostname) = location.location().address()
+        && let Some(candidate) =
+            hostname_index.find_hostname_candidate(hostname, location.location().port())
+    {
+        let mut resolved_ip = resolved_ip;
+        for rule_index in hostname_index.non_hostname_indices_through(candidate) {
+            if let Some(rule_index) = match_single_rule(
+                rule_index,
+                &rules[rule_index],
+                location,
+                &mut resolved_ip,
+                resolver,
+                resolve_rule_hostnames,
+            )
+            .await?
+            {
+                return Ok(Some(rule_index));
+            }
+        }
+
+        debug!(
+            "Found matching indexed hostname rule for {} -> rule {}",
+            location.location(),
+            candidate
+        );
+        return Ok(Some(candidate));
+    }
+
+    match_rule(
+        rules,
+        location,
+        resolved_ip,
+        resolver,
+        resolve_rule_hostnames,
+    )
+    .await
+}
+
+/// Returns the index of the matching rule.
+/// During matching, may resolve the location's address and cache it in `location`.
+#[inline]
 async fn match_rule(
     rules: &[ConnectRule],
     location: &mut ResolvedLocation,
@@ -427,37 +560,61 @@ async fn match_rule(
     resolve_rule_hostnames: bool,
 ) -> std::io::Result<Option<usize>> {
     for (rule_index, rule) in rules.iter().enumerate() {
-        for mask in rule.masks.iter() {
-            match match_mask(
-                mask,
-                location,
-                &mut resolved_ip,
-                resolver,
-                resolve_rule_hostnames,
-            )
-            .await
-            {
-                Ok(is_match) => {
-                    if is_match {
-                        debug!(
-                            "Found matching mask for {} -> {mask:?}",
-                            location.location()
-                        );
-                        return Ok(Some(rule_index));
-                    }
-                }
-                Err(MatchMaskError::Fatal(e)) => {
-                    return Err(std::io::Error::other(format!(
-                        "fatal error while matching mask for {}: {e}",
-                        location.location()
-                    )));
-                }
-                Err(MatchMaskError::NonFatal(e)) => {
-                    error!(
-                        "Non-fatal error while trying to match mask for {}: {e}",
+        if let Some(rule_index) = match_single_rule(
+            rule_index,
+            rule,
+            location,
+            &mut resolved_ip,
+            resolver,
+            resolve_rule_hostnames,
+        )
+        .await?
+        {
+            return Ok(Some(rule_index));
+        }
+    }
+    Ok(None)
+}
+
+#[inline]
+async fn match_single_rule(
+    rule_index: usize,
+    rule: &ConnectRule,
+    location: &mut ResolvedLocation,
+    resolved_ip: &mut Option<u128>,
+    resolver: &Arc<dyn Resolver>,
+    resolve_rule_hostnames: bool,
+) -> std::io::Result<Option<usize>> {
+    for mask in rule.masks.iter() {
+        match match_mask(
+            mask,
+            location,
+            resolved_ip,
+            resolver,
+            resolve_rule_hostnames,
+        )
+        .await
+        {
+            Ok(is_match) => {
+                if is_match {
+                    debug!(
+                        "Found matching mask for {} -> {mask:?}",
                         location.location()
                     );
+                    return Ok(Some(rule_index));
                 }
+            }
+            Err(MatchMaskError::Fatal(e)) => {
+                return Err(std::io::Error::other(format!(
+                    "fatal error while matching mask for {}: {e}",
+                    location.location()
+                )));
+            }
+            Err(MatchMaskError::NonFatal(e)) => {
+                error!(
+                    "Non-fatal error while trying to match mask for {}: {e}",
+                    location.location()
+                );
             }
         }
     }
@@ -949,6 +1106,28 @@ mod tests {
         match decision {
             ConnectDecision::Allow { .. } => {}
             ConnectDecision::Block => panic!("Expected Allow"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_hostname_index_preserves_earlier_ip_rule_priority() {
+        let rules = vec![
+            block_rule(vec!["93.184.216.34/32"]),
+            allow_rule(vec!["example.com"], "example_proxy"),
+            allow_rule(vec!["0.0.0.0/0"], "default"),
+        ];
+        let selector = ClientProxySelector::new(rules);
+        let resolver: Arc<dyn Resolver> = Arc::new(MockResolver::new().with_mapping(
+            "www.example.com",
+            443,
+            vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))],
+        ));
+
+        let location = NetLocation::new(Address::Hostname("www.example.com".to_string()), 443);
+        let decision = selector.judge(location.into(), &resolver).await.unwrap();
+        match decision {
+            ConnectDecision::Block => {}
+            ConnectDecision::Allow { .. } => panic!("Expected earlier IP block rule"),
         }
     }
 
