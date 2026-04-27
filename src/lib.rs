@@ -101,6 +101,7 @@ mod uuid_util;
 mod vless;
 mod vmess;
 mod websocket;
+mod wireguard;
 mod xudp;
 
 /// Configuration types.
