@@ -1,6 +1,10 @@
 //! Configuration validation - validates configs and creates final ServerConfigs.
 
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
+
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 
 use crate::address::NetLocationMask;
 use crate::dns::ParsedDnsUrl;
@@ -843,24 +847,38 @@ fn validate_client_vision_protocol(
     }
 }
 
-/// Recursive validation of client proxy config structure (Vision rules, etc.)
+/// Recursive validation of client proxy config structure (Vision rules, socket-only nesting, etc.)
 fn validate_client_proxy_structure(config: &ClientProxyConfig) -> std::io::Result<()> {
+    validate_client_proxy_structure_inner(config, false)
+}
+
+fn validate_client_proxy_structure_inner(
+    config: &ClientProxyConfig,
+    inside_stream_protocol: bool,
+) -> std::io::Result<()> {
+    if inside_stream_protocol && matches!(config, ClientProxyConfig::Wireguard(_)) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "WireGuard is a socket-level outbound and cannot be nested inside TLS, Reality, ShadowTLS, or WebSocket.",
+        ));
+    }
+
     match config {
         ClientProxyConfig::Tls(tls_config) => {
             validate_client_vision_protocol(tls_config.vision, &tls_config.protocol, "TLS")?;
-            validate_client_proxy_structure(&tls_config.protocol)?;
+            validate_client_proxy_structure_inner(&tls_config.protocol, true)?;
         }
         ClientProxyConfig::Reality {
             vision, protocol, ..
         } => {
             validate_client_vision_protocol(*vision, protocol, "Reality")?;
-            validate_client_proxy_structure(protocol)?;
+            validate_client_proxy_structure_inner(protocol, true)?;
         }
         ClientProxyConfig::ShadowTls { protocol, .. } => {
-            validate_client_proxy_structure(protocol)?;
+            validate_client_proxy_structure_inner(protocol, true)?;
         }
         ClientProxyConfig::Websocket(ws_config) => {
-            validate_client_proxy_structure(&ws_config.protocol)?;
+            validate_client_proxy_structure_inner(&ws_config.protocol, true)?;
         }
         _ => {}
     }
@@ -935,6 +953,131 @@ fn validate_server_fingerprints(
     Ok(())
 }
 
+fn validate_wireguard_base64_key(field_name: &str, key: &str) -> std::io::Result<()> {
+    let bytes = STANDARD.decode(key.trim()).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("WireGuard {field_name} is not valid base64: {e}"),
+        )
+    })?;
+
+    if bytes.len() != 32 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "WireGuard {field_name} must decode to 32 bytes, got {} bytes",
+                bytes.len()
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_wireguard_allowed_ip(value: &str) -> std::io::Result<()> {
+    let (addr, prefix) = value.split_once('/').ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("WireGuard allowed-ips entry '{value}' must be CIDR notation"),
+        )
+    })?;
+    let addr: IpAddr = addr.parse().map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("WireGuard allowed-ips entry '{value}' has invalid IP address: {e}"),
+        )
+    })?;
+    let prefix: u8 = prefix.parse().map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("WireGuard allowed-ips entry '{value}' has invalid prefix: {e}"),
+        )
+    })?;
+    let max_prefix = match addr {
+        IpAddr::V4(_) => 32,
+        IpAddr::V6(_) => 128,
+    };
+    if prefix > max_prefix {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "WireGuard allowed-ips entry '{value}' has prefix {prefix}, maximum for this address family is {max_prefix}"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_wireguard_client_config(config: &super::types::WireGuardClientConfig) -> std::io::Result<()> {
+    validate_wireguard_base64_key("private-key", &config.private_key)?;
+    validate_wireguard_base64_key("public-key", &config.public_key)?;
+    if let Some(key) = &config.pre_shared_key {
+        validate_wireguard_base64_key("pre-shared-key", key)?;
+    }
+
+    if !config.ip_version.allow_ipv4() && config.ipv6.is_none() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "WireGuard ip-version is ipv6-only but ipv6 is not configured.",
+        ));
+    }
+
+    if config.mtu < 576 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("WireGuard mtu must be at least 576, got {}", config.mtu),
+        ));
+    }
+
+    if config.allowed_ips.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "WireGuard allowed-ips must not be empty.",
+        ));
+    }
+    for allowed_ip in &config.allowed_ips {
+        validate_wireguard_allowed_ip(allowed_ip)?;
+    }
+
+    if config.remote_dns_resolve {
+        if !config.udp {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "WireGuard remote-dns-resolve requires udp: true.",
+            ));
+        }
+        if config.dns.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "WireGuard remote-dns-resolve requires at least one dns server.",
+            ));
+        }
+        if !config.dns.iter().any(|dns| match dns {
+            IpAddr::V4(_) => config.ip_version.allow_ipv4(),
+            IpAddr::V6(_) => config.ip_version.allow_ipv6() && config.ipv6.is_some(),
+        }) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "WireGuard dns does not contain any server usable with the configured ip-version and tunnel IPs.",
+            ));
+        }
+    }
+
+    if let Some(reserved) = &config.reserved
+        && reserved.len() != 3
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "WireGuard reserved must contain exactly 3 bytes, got {}.",
+                reserved.len()
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
 fn validate_client_proxy_config(
     client_proxy_config: &mut ClientProxyConfig,
     named_pems: &HashMap<String, String>,
@@ -978,6 +1121,10 @@ fn validate_client_proxy_config(
 
         ClientProxyConfig::Websocket(ws_config) => {
             validate_client_proxy_config(&mut ws_config.protocol, named_pems)?;
+        }
+
+        ClientProxyConfig::Wireguard(config) => {
+            validate_wireguard_client_config(config)?;
         }
 
         _ => {}
@@ -1315,7 +1462,7 @@ fn validate_rule_config(
             }
             // Then expand group references to inline configs
             expand_client_chain(&mut chain.hops, client_groups)?;
-            // Validate that direct connectors only appear at hop 0
+            // Validate that socket-only connectors only appear at hop 0
             validate_direct_connector_positions(&chain.hops, chain_index)?;
         }
     }
@@ -1323,31 +1470,37 @@ fn validate_rule_config(
     Ok(())
 }
 
-/// Validates that direct connectors only appear at hop 0.
+/// Validates that socket-only connectors only appear at hop 0.
 ///
-/// Direct connectors can only be used as the first hop in a chain because they
+/// Socket-only connectors can only be used as the first hop in a chain because they
 /// create the TCP connection. At hop 1+, the TCP connection already exists, so
-/// "direct" makes no sense there.
+/// they cannot wrap an existing stream.
 fn validate_direct_connector_positions(
     hops: &OneOrSome<ClientChainHop>,
     chain_index: usize,
 ) -> std::io::Result<()> {
     for (hop_index, hop) in hops.iter().enumerate() {
         if hop_index == 0 {
-            // Direct connectors are allowed at hop 0
+            // Socket-only connectors are allowed at hop 0
             continue;
         }
 
-        // For hop 1+, check if any connector is direct
-        let has_direct = match hop {
-            ClientChainHop::Single(ConfigSelection::Config(config)) => config.protocol.is_direct(),
+        // For hop 1+, check if any connector is socket-only
+        let socket_only_protocol = match hop {
+            ClientChainHop::Single(ConfigSelection::Config(config)) => config
+                .protocol
+                .is_socket_only()
+                .then(|| config.protocol.protocol_name().to_string()),
             ClientChainHop::Single(ConfigSelection::GroupName(_)) => {
                 // Groups should already be expanded at this point
                 unreachable!("Group references should be expanded before validation")
             }
             ClientChainHop::Pool(selections) => {
-                selections.iter().any(|selection| match selection {
-                    ConfigSelection::Config(config) => config.protocol.is_direct(),
+                selections.iter().find_map(|selection| match selection {
+                    ConfigSelection::Config(config) => config
+                        .protocol
+                        .is_socket_only()
+                        .then(|| config.protocol.protocol_name().to_string()),
                     ConfigSelection::GroupName(_) => {
                         unreachable!("Group references should be expanded before validation")
                     }
@@ -1355,15 +1508,15 @@ fn validate_direct_connector_positions(
             }
         };
 
-        if has_direct {
+        if let Some(protocol_name) = socket_only_protocol {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!(
-                    "Direct connector at chain {} hop {} is invalid. \
-                     Direct connectors can only be used at hop 0 (the first hop) \
+                    "{} connector at chain {} hop {} is invalid. \
+                     Socket-only connectors can only be used at hop 0 (the first hop) \
                      because they create the TCP connection. At hop 1+, the connection \
                      already exists through the previous hop.",
-                    chain_index, hop_index
+                    protocol_name, chain_index, hop_index
                 ),
             ));
         }
