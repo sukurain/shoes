@@ -57,4 +57,18 @@ pub trait SocketConnector: Send + Sync + Debug {
 
     /// Returns the bind interface configured for this socket connector, if any.
     fn bind_interface(&self) -> Option<&str>;
+
+    /// Returns true when this connector is the native direct socket connector.
+    ///
+    /// Some socket-level outbounds, such as WireGuard, are represented as
+    /// InitialHopEntry::Direct because they do not wrap an existing stream.
+    /// They are not "direct-only" for DNS/bootstrap optimizations.
+    fn is_native_direct(&self) -> bool {
+        true
+    }
+
+    /// Returns true when this socket-level connector can create UDP flows.
+    fn supports_udp(&self) -> bool {
+        true
+    }
 }
