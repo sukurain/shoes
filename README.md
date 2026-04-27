@@ -18,6 +18,7 @@ shoes is a high-performance multi-protocol proxy server written in Rust.
 - **AnyTLS**
 - **NaiveProxy**
 - **H2MUX** (supported with VMess, VLESS, Trojan, Shadowsocks, Snell)
+- **WireGuard** (client/outbound only, supports WARP-style peers)
 
 ### Transport Protocols
 All server protocols plus:
@@ -43,6 +44,7 @@ All server protocols plus:
 - **TLS with SNI routing**: Route by Server Name Indication
 - **Upstream proxy chaining**: Multi-hop chains with load balancing
 - **Rule-based routing**: Route by IP/CIDR or hostname masks
+- **WireGuard outbound routing**: Route selected traffic through WireGuard peers
 - **Named PEM certificates**: Define once, reference everywhere
 - **TLS fingerprint authentication**: Certificate pinning for TLS/QUIC
 - **Hot reloading**: Apply config changes without restart
@@ -168,6 +170,38 @@ See the [examples](./examples) directory for all examples.
           protocol:
             type: vless
             user_id: b85798ef-e9dc-46a4-9a87-8da4499d36d0
+```
+
+### WireGuard Outbound
+```yaml
+- client_group: warp
+  client_proxies:
+    - protocol:
+        type: wireguard
+        private-key: "YOUR_BASE64_PRIVATE_KEY"
+        server: 162.159.193.5
+        port: 4500
+        ip: 172.16.0.2
+        ipv6: 2606:4700:cf1:1000::1
+        public-key: "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
+        allowed-ips: ["0.0.0.0/0", "::/0"]
+        udp: true
+        mtu: 1408
+        ip-version: ipv6-prefer
+        remote-dns-resolve: true
+        dns: ["2606:4700:4700::1111"]
+
+- address: 127.0.0.1:1080
+  protocol:
+    type: socks
+    udp_enabled: true
+  rules:
+    - masks: ["youtube.com", "googlevideo.com"]
+      action: allow
+      client_chain: warp
+    - masks: ["0.0.0.0/0", "::/0"]
+      action: allow
+      client_chain: direct
 ```
 
 ### Hysteria2 Server
