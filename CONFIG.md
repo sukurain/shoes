@@ -1,125 +1,125 @@
-# Configuration Reference
+# 配置参考 (Configuration Reference)
 
-shoes uses YAML configuration files. Multiple configuration types can be combined in a single file or split across multiple files.
+shoes 使用 YAML 配置文件。可以将多种配置类型组合在单个文件中，也可以拆分到多个文件中。
 
-## Table of Contents
-- [Configuration Structure](#configuration-structure)
-- [Server Config](#server-config)
-- [Server Protocols](#server-protocols)
-- [TUN Config](#tun-config)
-- [Client Config](#client-config)
-- [Client Protocols](#client-protocols)
-- [Rules System](#rules-system)
-- [Named Groups](#named-groups)
-- [Named PEMs](#named-pems)
-- [Advanced Features](#advanced-features)
-- [Command Line](#command-line)
+## 目录
+- [配置结构](#配置结构-configuration-structure)
+- [服务端配置](#服务端配置-server-config)
+- [服务端协议](#服务端协议-server-protocols)
+- [TUN 配置](#tun-配置-tun-config)
+- [客户端配置](#客户端配置-client-config)
+- [客户端协议](#客户端协议-client-protocols)
+- [规则系统](#规则系统-rules-system)
+- [命名组](#命名组-named-groups)
+- [命名 PEM](#命名-pem-named-pems)
+- [高级功能](#高级功能-advanced-features)
+- [命令行](#命令行-command-line)
 
-## Configuration Structure
+## 配置结构 (Configuration Structure)
 
-A configuration file is a YAML array containing one or more configuration entries. Each entry can be:
+配置文件是一个包含一个或多个配置项的 YAML 数组。每个配置项可以是：
 
-- **Server Config** - Defines a proxy server instance
-- **TUN Config** - Defines a TUN/VPN device for transparent proxying
-- **Client Config Group** - Defines reusable upstream proxy configurations
-- **Rule Config Group** - Defines reusable routing rules
-- **Named PEM** - Defines reusable certificate/key data
+- **Server Config (服务端配置)** - 定义一个代理服务器实例
+- **TUN Config (TUN 配置)** - 定义用于透明代理的 TUN/VPN 设备
+- **Client Config Group (客户端配置组)** - 定义可重用的上游代理配置
+- **Rule Config Group (规则配置组)** - 定义可重用的路由规则
+- **Named PEM (命名 PEM)** - 定义可重用的证书/密钥数据
 
 ```yaml
-# Server configs have 'address' or 'path'
+# 服务端配置包含 'address' 或 'path'
 - address: "0.0.0.0:8080"
   protocol: ...
 
-# TUN configs have 'device_name' or 'device_fd'
+# TUN 配置包含 'device_name' 或 'device_fd'
 - device_name: "tun0"
   address: "10.0.0.1"
   ...
 
-# Client config groups have 'client_group'
+# 客户端配置组包含 'client_group'
 - client_group: my-upstream
   client_proxy: ...
 
-# Rule config groups have 'rule_group'
+# 规则配置组包含 'rule_group'
 - rule_group: my-rules
   rules: ...
 
-# Named PEMs have 'pem'
+# 命名 PEM 包含 'pem'
 - pem: my-cert
   path: /path/to/cert.pem
 ```
 
-## Server Config
+## 服务端配置 (Server Config)
 
 ```yaml
-# Bind to IP address and port
+# 绑定到 IP 地址和端口
 address: "0.0.0.0:8080"        # IPv4
 address: "[::]:8080"           # IPv6
-address: "0.0.0.0:443-445"     # Port range
+address: "0.0.0.0:443-445"     # 端口范围
 
-# OR bind to Unix socket (TCP only)
+# 或绑定到 Unix socket (仅支持 TCP)
 path: "/tmp/shoes.sock"
 
-# Protocol configuration (required)
+# 协议配置 (必填)
 protocol: ServerProxyConfig
 
-# Transport layer (default: tcp)
+# 传输层 (默认: tcp)
 transport: tcp | quic
 
-# TCP settings (only when transport: tcp)
+# TCP 设置 (仅当 transport: tcp 时有效)
 tcp_settings:
-  no_delay: true               # Default: true
+  no_delay: true               # 默认: true
 
-# QUIC settings (required when transport: quic)
+# QUIC 设置 (当 transport: quic 时必填)
 quic_settings:
-  cert: string                 # TLS certificate (path or named PEM)
-  key: string                  # TLS private key (path or named PEM)
-  alpn_protocols: [string]     # Optional ALPN protocols
-  client_ca_certs: [string]    # Optional client CA certificates
-  client_fingerprints: [string] # Optional client certificate fingerprints
-  num_endpoints: int           # Optional, 0 = auto (based on thread count)
+  cert: string                 # TLS 证书 (路径或命名 PEM)
+  key: string                  # TLS 私钥 (路径或命名 PEM)
+  alpn_protocols: [string]     # 可选的 ALPN 协议
+  client_ca_certs: [string]    # 可选的客户端 CA 证书
+  client_fingerprints: [string] # 可选的客户端证书指纹
+  num_endpoints: int           # 可选，0 = 自动 (基于线程数)
 
-# Routing rules (default: allow-all-direct)
+# 路由规则 (默认: allow-all-direct)
 rules: string | [RuleConfig]
 ```
 
-## Server Protocols
+## 服务端协议 (Server Protocols)
 
 ### HTTP
 ```yaml
 protocol:
   type: http
-  username: string?            # Optional authentication
+  username: string?            # 可选的身份验证
   password: string?
 ```
 
 ### SOCKS5
 ```yaml
 protocol:
-  type: socks                  # Aliases: socks5
+  type: socks                  # 别名: socks5
   username: string?
   password: string?
-  udp_enabled: true            # Default: true (enables UDP ASSOCIATE)
+  udp_enabled: true            # 默认: true (启用 UDP ASSOCIATE)
 ```
 
-### Mixed (HTTP + SOCKS5)
+### 混合模式 (HTTP + SOCKS5)
 ```yaml
 protocol:
-  type: mixed                  # Aliases: http+socks, socks+http
+  type: mixed                  # 别名: http+socks, socks+http
   username: string?
   password: string?
-  udp_enabled: true            # Default: true (enables UDP ASSOCIATE for SOCKS5)
+  udp_enabled: true            # 默认: true (为 SOCKS5 启用 UDP ASSOCIATE)
 ```
 
-Auto-detects HTTP or SOCKS5 protocol from the first byte of the connection.
+根据连接的第一个字节自动检测 HTTP 或 SOCKS5 协议。
 
 ### Shadowsocks
 ```yaml
 protocol:
-  type: shadowsocks            # Aliases: ss
-  cipher: string               # See supported ciphers below
+  type: shadowsocks            # 别名: ss
+  cipher: string               # 参见下方支持的加密方式
   password: string
 
-# Supported ciphers:
+# 支持的加密方式:
 # - aes-128-gcm
 # - aes-256-gcm
 # - chacha20-ietf-poly1305
@@ -134,18 +134,18 @@ protocol:
   type: vmess
   cipher: string               # aes-128-gcm, chacha20-poly1305, none
   user_id: string              # UUID
-  udp_enabled: true            # Default: true (enables XUDP)
+  udp_enabled: true            # 默认: true (启用 XUDP)
 ```
 
-**Note:** VMess AEAD mode is always enabled. The legacy `force_aead` field is deprecated and non-AEAD mode is no longer supported.
+**注意:** VMess AEAD 模式始终处于启用状态。已废弃旧版 `force_aead` 字段，不再支持非 AEAD 模式。
 
 ### VLESS
 ```yaml
 protocol:
   type: vless
   user_id: string              # UUID
-  udp_enabled: true            # Default: true (enables XUDP)
-  fallback: string?            # Optional fallback destination for failed auth (e.g., "127.0.0.1:80")
+  udp_enabled: true            # 默认: true (启用 XUDP)
+  fallback: string?            # 可选的认证失败回退目标 (例如: "127.0.0.1:80")
 ```
 
 ### Trojan
@@ -153,7 +153,7 @@ protocol:
 protocol:
   type: trojan
   password: string
-  shadowsocks:                 # Optional encryption layer
+  shadowsocks:                 # 可选的加密层
     cipher: string
     password: string
 ```
@@ -164,8 +164,8 @@ protocol:
   type: snell
   cipher: string               # aes-128-gcm, aes-256-gcm, chacha20-ietf-poly1305
   password: string
-  udp_enabled: true            # Default: true
-  udp_num_sockets: 1           # Default: 1, sockets per UDP session
+  udp_enabled: true            # 默认: true
+  udp_num_sockets: 1           # 默认: 1, 每个 UDP 会话的套接字数
 ```
 
 ### TLS Server
@@ -173,78 +173,78 @@ protocol:
 protocol:
   type: tls
 
-  # Standard TLS targets (by SNI)
-  tls_targets:                 # Aliases: sni_targets, targets
+  # 标准 TLS 目标 (根据 SNI)
+  tls_targets:                 # 别名: sni_targets, targets
     "example.com":
-      cert: string             # Certificate (path or named PEM)
-      key: string              # Private key (path or named PEM)
-      alpn_protocols: [string] # Optional ALPN
-      client_ca_certs: [string] # Optional client CA certs
-      client_fingerprints: [string] # Optional client cert fingerprints
-      vision: false            # Enable Vision (requires VLESS inner protocol)
+      cert: string             # 证书 (路径或命名 PEM)
+      key: string              # 私钥 (路径或命名 PEM)
+      alpn_protocols: [string] # 可选的 ALPN
+      client_ca_certs: [string] # 可选的客户端 CA 证书
+      client_fingerprints: [string] # 可选的客户端证书指纹
+      vision: false            # 启用 Vision (需要 VLESS 内部协议)
       protocol: ServerProxyConfig
-      override_rules: [RuleConfig] # Optional rule override
+      override_rules: [RuleConfig] # 可选的规则覆盖
 
-  # Default TLS target (for unmatched/no SNI)
-  default_tls_target:          # Aliases: default_target
+  # 默认 TLS 目标 (无匹配或无 SNI 时)
+  default_tls_target:          # 别名: default_target
     cert: string
     key: string
-    # ... same fields as tls_targets
+    # ... 与 tls_targets 的字段相同
 
-  # Reality targets (by SNI)
+  # Reality 目标 (根据 SNI)
   reality_targets:
     "www.cloudflare.com":
-      private_key: string      # X25519 private key (base64url)
-      short_ids: [string]      # Valid client IDs (hex, 0-16 chars)
-      dest: string             # Fallback destination (e.g., "example.com:443")
-      dest_client_chain: ClientChain?  # Optional proxy chain for reaching dest
-      max_time_diff: 60000     # Max timestamp diff in ms (default: 60000)
-      min_client_version: [1, 8, 0]  # Optional [major, minor, patch]
-      max_client_version: [2, 0, 0]  # Optional [major, minor, patch]
-      cipher_suites: [string]  # Optional TLS 1.3 cipher suites (see below)
-      vision: false            # Enable Vision (requires VLESS inner protocol)
+      private_key: string      # X25519 私钥 (base64url)
+      short_ids: [string]      # 有效的客户端 ID (十六进制, 0-16 个字符)
+      dest: string             # 回退目标 (例如: "example.com:443")
+      dest_client_chain: ClientChain?  # 可选的用于到达回退目标的代理链
+      max_time_diff: 60000     # 最大时间差(毫秒) (默认: 60000)
+      min_client_version: [1, 8, 0]  # 可选的 [主版本, 次版本, 补丁号]
+      max_client_version: [2, 0, 0]  # 可选的 [主版本, 次版本, 补丁号]
+      cipher_suites: [string]  # 可选的 TLS 1.3 密码套件 (见下方)
+      vision: false            # 启用 Vision (需要 VLESS 内部协议)
       protocol: ServerProxyConfig
       override_rules: [RuleConfig]
 
-  # ShadowTLS v3 targets (by SNI)
+  # ShadowTLS v3 目标 (根据 SNI)
   shadowtls_targets:
     "example.com":
       password: string
       handshake:
-        # Local handshake (with own certificate):
+        # 本地握手 (使用自己的证书):
         cert: string
         key: string
         alpn_protocols: [string]
         client_ca_certs: [string]
         client_fingerprints: [string]
-        # OR Remote handshake (proxy to real server):
-        address: string        # e.g., "google.com:443"
-        client_proxies: [ClientConfig] # Optional proxies for handshake
+        # 或远程握手 (代理至真实服务器):
+        address: string        # 例如: "google.com:443"
+        client_proxies: [ClientConfig] # 可选的用于握手的代理
       protocol: ServerProxyConfig
       override_rules: [RuleConfig]
 
-  # Buffer size for TLS (optional, min 16384)
+  # TLS 缓冲区大小 (可选, 最小 16384)
   tls_buffer_size: int
 ```
 
 ### WebSocket
 ```yaml
 protocol:
-  type: websocket              # Aliases: ws
+  type: websocket              # 别名: ws
   targets:
-    - matching_path: string?   # Optional path filter (e.g., "/ws")
-      matching_headers:        # Optional header filters
+    - matching_path: string?   # 可选的路径匹配 (例如: "/ws")
+      matching_headers:        # 可选的头部匹配
         X-Custom-Header: "value"
       protocol: ServerProxyConfig
       ping_type: ping-frame    # disabled | ping-frame | empty-frame
       override_rules: [RuleConfig]
 ```
 
-### Port Forward
+### 端口转发 (Port Forward)
 ```yaml
 protocol:
-  type: forward                # Aliases: port_forward, portforward
-  targets: string | [string]   # Target address(es)
+  type: forward                # 别名: port_forward, portforward
+  targets: string | [string]   # 目标地址
 ```
 
 ### Hysteria2
@@ -252,77 +252,77 @@ protocol:
 protocol:
   type: hysteria2
   password: string
-  udp_enabled: true            # Default: true
+  udp_enabled: true            # 默认: true
 ```
 
 ### TUIC v5
 ```yaml
 protocol:
-  type: tuic                   # Aliases: tuicv5
+  type: tuic                   # 别名: tuicv5
   uuid: string                 # UUID
   password: string
-  zero_rtt_handshake: false    # Default: false (enables 0-RTT for lower latency)
+  zero_rtt_handshake: false    # 默认: false (启用 0-RTT 可实现更低延迟)
 ```
 
 ### AnyTLS
 ```yaml
 protocol:
   type: anytls
-  users:                       # One or more users
-    - name: string?            # Optional display name
-      password: string         # User password
-  udp_enabled: true            # Default: true (enables UDP over TCP)
-  padding_scheme: [string]?    # Optional custom padding (e.g., ["stop=8", "0=30-30"])
-  fallback: string?            # Optional fallback destination for failed auth
+  users:                       # 一个或多个用户
+    - name: string?            # 可选的显示名称
+      password: string         # 用户密码
+  udp_enabled: true            # 默认: true (启用基于 TCP 的 UDP)
+  padding_scheme: [string]?    # 可选的自定义填充 (例如: ["stop=8", "0=30-30"])
+  fallback: string?            # 可选的认证失败回退目标
 ```
 
-AnyTLS is a TLS-based multiplexing proxy protocol with traffic obfuscation. Should be used within TLS or Reality.
+AnyTLS 是一种带有流量混淆的基于 TLS 的多路复用代理协议。应在 TLS 或 Reality 内部使用。
 
 ### NaiveProxy
 ```yaml
 protocol:
-  type: naiveproxy             # Aliases: naive
-  users:                       # One or more users
-    - name: string?            # Optional display name
-      username: string         # Basic Auth username
-      password: string         # Basic Auth password
-  padding: true                # Default: true (enables padding protocol)
-  udp_enabled: true            # Default: true (enables UDP over TCP)
-  fallback: string?            # Optional path to serve static files for probe resistance
+  type: naiveproxy             # 别名: naive
+  users:                       # 一个或多个用户
+    - name: string?            # 可选的显示名称
+      username: string         # Basic Auth 用户名
+      password: string         # Basic Auth 密码
+  padding: true                # 默认: true (启用填充协议)
+  udp_enabled: true            # 默认: true (启用基于 TCP 的 UDP)
+  fallback: string?            # 可选的用于提供静态文件以抵抗主动探测的路径
 ```
 
-NaiveProxy implements HTTP/2 CONNECT with padding for censorship resistance. Should be used within TLS with `alpn_protocols: ["h2"]`.
+NaiveProxy 实现了带有用于抵抗审查填充的 HTTP/2 CONNECT。应在配置了 `alpn_protocols: ["h2"]` 的 TLS 内部使用。
 
-## TUN Config
+## TUN 配置 (TUN Config)
 
-TUN (network TUNnel) devices operate at the IP layer (Layer 3), allowing shoes to act as a transparent VPN.
+TUN（网络隧道）设备在 IP 层 (第三层) 运行，这允许 shoes 作为透明 VPN 工作。
 
 ```yaml
-# Linux: Create TUN device by name
-device_name: string            # Device name (e.g., "tun0")
-address: string                # Device IP address (e.g., "10.0.0.1")
-netmask: string?               # Netmask (e.g., "255.255.255.0")
-destination: string?           # Gateway/destination (Linux only)
+# Linux: 根据名称创建 TUN 设备
+device_name: string            # 设备名称 (例如: "tun0")
+address: string                # 设备 IP 地址 (例如: "10.0.0.1")
+netmask: string?               # 子网掩码 (例如: "255.255.255.0")
+destination: string?           # 网关/目标 (仅限 Linux)
 
-# iOS/Android: Use existing file descriptor
-device_fd: int                 # FD from VpnService (Android) or NEPacketTunnelProvider (iOS)
+# iOS/Android: 使用现有的文件描述符 (File Descriptor)
+device_fd: int                 # 来源于 VpnService (Android) 或 NEPacketTunnelProvider (iOS) 的 FD
 
-# Common settings
-mtu: 1500                      # Default: 1500 (Linux), 9000 (Android), 4064 (iOS)
-tcp_enabled: true              # Default: true
-udp_enabled: true              # Default: true
-icmp_enabled: true             # Default: true
+# 通用设置
+mtu: 1500                      # 默认: 1500 (Linux), 9000 (Android), 4064 (iOS)
+tcp_enabled: true              # 默认: true
+udp_enabled: true              # 默认: true
+icmp_enabled: true             # 默认: true
 
-# Routing rules
+# 路由规则
 rules: [RuleConfig]
 ```
 
-**Platform notes:**
-- **Linux**: Requires root or `CAP_NET_ADMIN`. Creates device with specified name/address.
-- **Android**: Use `device_fd` from `VpnService.Builder.establish()`. Routes configured via VpnService.
-- **iOS**: Use `device_fd` from `NEPacketTunnelProvider.packetFlow`.
+**平台说明:**
+- **Linux**: 需要 root 权限或 `CAP_NET_ADMIN`。根据指定名称/地址创建设备。
+- **Android**: 使用 `VpnService.Builder.establish()` 返回的 `device_fd`。路由由 VpnService 配置。
+- **iOS**: 使用 `NEPacketTunnelProvider.packetFlow` 返回的 `device_fd`。
 
-**Example (Linux):**
+**示例 (Linux):**
 ```yaml
 - device_name: "tun0"
   address: "10.0.0.1"
@@ -342,31 +342,31 @@ rules: [RuleConfig]
             user_id: "uuid"
 ```
 
-## Client Config
+## 客户端配置 (Client Config)
 
-Used in rules to specify upstream proxies.
+在规则中用于指定上游代理。
 
 ```yaml
-address: string                # Proxy server address (e.g., "proxy.example.com:1080")
+address: string                # 代理服务器地址 (例如: "proxy.example.com:1080")
 protocol: ClientProxyConfig
-transport: tcp | quic          # Default: tcp
-bind_interface: string         # Optional, Linux/Android/Fuchsia only
+transport: tcp | quic          # 默认: tcp
+bind_interface: string         # 可选, 仅限 Linux/Android/Fuchsia
 
 tcp_settings:
   no_delay: true
 
 quic_settings:
-  verify: true                 # Default: true
+  verify: true                 # 默认: true
   server_fingerprints: [string]
   sni_hostname: string
   alpn_protocols: [string]
-  cert: string                 # Client certificate for mTLS
-  key: string                  # Client key for mTLS
+  cert: string                 # 用于 mTLS 的客户端证书
+  key: string                  # 用于 mTLS 的客户端私钥
 ```
 
-## Client Protocols
+## 客户端协议 (Client Protocols)
 
-### Direct
+### 直连 (Direct)
 ```yaml
 protocol:
   type: direct
@@ -410,21 +410,21 @@ protocol:
   type: vmess
   cipher: string
   user_id: string
-  h2mux:                         # Optional h2mux multiplexing (see below)
+  h2mux:                         # 可选的 h2mux 多路复用 (见下方)
     max_connections: 4
     min_streams: 4
     max_streams: 0
     padding: false
 ```
 
-**Note:** VMess AEAD mode is always enabled. The legacy `aead` field is deprecated.
+**注意:** VMess AEAD 模式始终启用。已废弃旧版 `aead` 字段。
 
 ### VLESS
 ```yaml
 protocol:
   type: vless
   user_id: string
-  h2mux:                         # Optional h2mux multiplexing (see below)
+  h2mux:                         # 可选的 h2mux 多路复用 (见下方)
     max_connections: 4
     min_streams: 4
     max_streams: 0
@@ -436,42 +436,42 @@ protocol:
 protocol:
   type: trojan
   password: string
-  shadowsocks:                 # Optional
+  shadowsocks:                 # 可选
     cipher: string
     password: string
-  h2mux:                         # Optional h2mux multiplexing (see below)
+  h2mux:                         # 可选的 h2mux 多路复用 (见下方)
     max_connections: 4
     min_streams: 4
     max_streams: 0
     padding: false
 ```
 
-### H2MUX Multiplexing
+### H2MUX 多路复用 (H2MUX Multiplexing)
 
-H2MUX multiplexes multiple proxy streams over a single HTTP/2 connection, reducing connection overhead. Compatible with sing-box. Available for VMess, VLESS, and Trojan client protocols.
+H2MUX 将多个代理流复用到单个 HTTP/2 连接上，从而减少连接开销。与 sing-box 兼容。支持 VMess、VLESS 和 Trojan 客户端协议。
 
 ```yaml
 h2mux:
-  max_connections: 4           # Maximum connections to maintain (default: 4)
-  min_streams: 4               # Min streams before opening new connection (default: 4)
-  max_streams: 0               # Max streams per connection, 0 = unlimited (default: 0)
-  padding: false               # Enable padding for traffic obfuscation (default: false)
+  max_connections: 4           # 维护的最大连接数 (默认: 4)
+  min_streams: 4               # 在开启新连接之前的最小流数 (默认: 4)
+  max_streams: 0               # 每个连接的最大流数, 0 = 无限制 (默认: 0)
+  padding: false               # 启用流量混淆填充 (默认: false)
 ```
 
-**Server support:** H2MUX is auto-detected on servers. No configuration needed.
+**服务端支持:** 服务端会自动检测 H2MUX。无需进行配置。
 
 ### TLS Client
 ```yaml
 protocol:
   type: tls
-  verify: true                 # Default: true
+  verify: true                 # 默认: true
   server_fingerprints: [string]
   sni_hostname: string
   alpn_protocols: [string]
   tls_buffer_size: int
-  cert: string                 # Client certificate for mTLS
-  key: string                  # Client key for mTLS
-  vision: false                # Enable Vision (requires VLESS inner protocol)
+  cert: string                 # 用于 mTLS 的客户端证书
+  key: string                  # 用于 mTLS 的客户端私钥
+  vision: false                # 启用 Vision (需要 VLESS 内部协议)
   protocol: ClientProxyConfig
 ```
 
@@ -479,22 +479,22 @@ protocol:
 ```yaml
 protocol:
   type: reality
-  public_key: string           # Server's X25519 public key (base64url)
-  short_id: string             # Your client ID (hex, 0-16 chars)
-  sni_hostname: string         # SNI to send (must match server's reality_targets key)
-  cipher_suites: [string]      # Optional TLS 1.3 cipher suites (see below)
-  vision: false                # Enable Vision (requires VLESS inner protocol)
-  protocol: ClientProxyConfig  # Inner protocol (typically VLESS)
+  public_key: string           # 服务器的 X25519 公钥 (base64url)
+  short_id: string             # 您的客户端 ID (十六进制, 0-16 个字符)
+  sni_hostname: string         # 要发送的 SNI (必须与服务端的 reality_targets key 匹配)
+  cipher_suites: [string]      # 可选的 TLS 1.3 密码套件 (见下方)
+  vision: false                # 启用 Vision (需要 VLESS 内部协议)
+  protocol: ClientProxyConfig  # 内部协议 (通常是 VLESS)
 ```
 
-**Reality cipher suites:** Valid values are `TLS_AES_128_GCM_SHA256`, `TLS_AES_256_GCM_SHA384`, `TLS_CHACHA20_POLY1305_SHA256`. If not specified, all three are offered/supported.
+**Reality 密码套件:** 有效值为 `TLS_AES_128_GCM_SHA256`、`TLS_AES_256_GCM_SHA384`、`TLS_CHACHA20_POLY1305_SHA256`。如果未指定，将提供/支持全部三种。
 
 ### ShadowTLS Client
 ```yaml
 protocol:
   type: shadowtls
   password: string
-  sni_hostname: string?        # Optional SNI override
+  sni_hostname: string?        # 可选的 SNI 覆盖
   protocol: ClientProxyConfig
 ```
 
@@ -509,116 +509,116 @@ protocol:
   protocol: ClientProxyConfig
 ```
 
-### Port Forward (No-op)
+### 端口转发 (无操作) (Port Forward (No-op))
 ```yaml
 protocol:
-  type: portforward            # Aliases: noop
+  type: portforward            # 别名: noop
 ```
 
-Passes through the raw connection without protocol wrapping. Useful for testing or transparent proxying.
+直接透传原始连接，不进行协议包装。适用于测试或透明代理。
 
 ### AnyTLS Client
 ```yaml
 protocol:
   type: anytls
-  password: string             # User password
-  udp_enabled: true            # Default: true (enables UDP over TCP)
-  padding_scheme: [string]?    # Optional custom padding scheme
+  password: string             # 用户密码
+  udp_enabled: true            # 默认: true (启用基于 TCP 的 UDP)
+  padding_scheme: [string]?    # 可选的自定义填充方案
 ```
 
 ### NaiveProxy Client
 ```yaml
 protocol:
-  type: naiveproxy             # Aliases: naive
-  username: string             # Basic Auth username
-  password: string             # Basic Auth password
-  padding: true                # Default: true (enables padding protocol)
+  type: naiveproxy             # 别名: naive
+  username: string             # Basic Auth 用户名
+  password: string             # Basic Auth 密码
+  padding: true                # 默认: true (启用填充协议)
 ```
 
-## Rules System
+## 规则系统 (Rules System)
 
-Rules determine how incoming connections are routed.
+规则决定了传入连接的路由方式。
 
-### Rule Config
+### 规则配置 (Rule Config)
 ```yaml
 rules:
-  - masks: string | [string]   # IP/CIDR or hostname masks
+  - masks: string | [string]   # IP/CIDR 或主机名掩码
     action: allow | block
-    # For action: allow
-    override_address: string?  # Optional address override
-    client_chain: ClientChain | [ClientChain]  # Proxy chain(s) for routing
+    # 对于 action: allow
+    override_address: string?  # 可选的地址覆盖
+    client_chain: ClientChain | [ClientChain]  # 用于路由的代理链
 ```
 
-### Client Chains
+### 客户端链 (Client Chains)
 
-Client chains define how traffic is routed through upstream proxies. Each chain is a sequence of "hops" - proxies that traffic passes through in order.
+客户端链定义了流量应如何通过上游代理路由。每条链都是一系列“跃点” (hops) - 即流量按顺序通过的代理。
 
 ```yaml
-# Single proxy (simplest form)
-client_chain: my-proxy-group           # Reference a named group
-client_chain:                          # Or inline config
+# 单个代理 (最简单形式)
+client_chain: my-proxy-group           # 引用命名组
+client_chain:                          # 或内联配置
   address: "proxy.example.com:1080"
   protocol:
     type: socks
 
-# Multi-hop chain (traffic goes: client -> hop1 -> hop2 -> target)
+# 多跳链 (流量走向: 客户端 -> hop1 -> hop2 -> 目标)
 client_chain:
   chain:
     - first-proxy-group
     - second-proxy-group
 
-# Multiple chains (round-robin selection)
+# 多条链 (轮询选择)
 client_chains:
-  - us-proxy-group                     # Chain 1: single hop
-  - chain: [proxy1, proxy2]            # Chain 2: multi-hop
+  - us-proxy-group                     # 链 1: 单跳
+  - chain: [proxy1, proxy2]            # 链 2: 多跳
 
-# Load balancing at a hop (pool)
+# 在跃点处进行负载均衡 (代理池)
 client_chain:
   chain:
-    - pool: [us-proxies, eu-proxies]   # Round-robin between pool members
+    - pool: [us-proxies, eu-proxies]   # 在池成员之间轮询
     - final-proxy
 ```
 
-**Migration note:** The `client_proxy` / `client_proxies` fields still work but are deprecated. Please migrate to `client_chain` / `client_chains`.
+**迁移说明:** `client_proxy` / `client_proxies` 字段仍然有效但已被废弃。请迁移至 `client_chain` / `client_chains`。
 
-### Mask Syntax
+### 掩码语法 (Mask Syntax)
 ```yaml
-# IP/CIDR masks
-masks: "0.0.0.0/0"             # All IPv4
-masks: "::/0"                  # All IPv6
-masks: "192.168.0.0/16"        # Subnet
-masks: "10.0.0.1:80"           # Specific IP and port
+# IP/CIDR 掩码
+masks: "0.0.0.0/0"             # 所有 IPv4
+masks: "::/0"                  # 所有 IPv6
+masks: "192.168.0.0/16"        # 子网
+masks: "10.0.0.1:80"           # 特定 IP 和端口
 
-# Hostname masks
-masks: "*.google.com"          # Wildcard subdomain
-masks: "example.com"           # Exact match
+# 主机名掩码
+masks: "*.google.com"          # 通配符子域名
+masks: "example.com"           # 精确匹配
 
-# Multiple masks
+# 多个掩码
 masks:
   - "192.168.0.0/16"
   - "10.0.0.0/8"
   - "*.internal.com"
 ```
 
-### Built-in Rule Groups
-- `allow-all-direct` - Allow all connections, direct routing
-- `block-all` - Block all connections
+### 内置规则组
+- `allow-all-direct` - 允许所有连接，并直连路由
+- `block-all` - 阻止所有连接
 
-### Example Rules
+### 示例规则 (Example Rules)
 ```yaml
 rules:
-  # Direct connection for local networks
+  # 对本地网络使用直连
   - masks: ["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"]
     action: allow
     client_chain:
       protocol:
         type: direct
 
-  # Block specific domains
+  # 阻止特定域名
   - masks: ["*.ads.example.com", "tracking.example.com"]
     action: block
 
-  # Route through upstream proxy
+  # 通过上游代理路由
   - masks: "0.0.0.0/0"
     action: allow
     client_chain:
@@ -627,12 +627,12 @@ rules:
         type: socks
 ```
 
-## Named Groups
+## 命名组 (Named Groups)
 
-### Client Proxy Group
+### 客户端代理组 (Client Proxy Group)
 ```yaml
 - client_group: my-upstream
-  client_proxies:              # Define proxies in this group
+  client_proxies:              # 在此组中定义代理
     - address: "proxy1.example.com:1080"
       protocol:
         type: socks
@@ -640,17 +640,17 @@ rules:
       protocol:
         type: socks
 
-# Reference in rules
+# 在规则中引用
 - address: "0.0.0.0:8080"
   protocol:
     type: http
   rules:
     - masks: "0.0.0.0/0"
       action: allow
-      client_chain: my-upstream  # Reference by name
+      client_chain: my-upstream  # 根据名称引用
 ```
 
-### Rule Group
+### 规则组 (Rule Group)
 ```yaml
 - rule_group: standard-rules
   rules:
@@ -663,50 +663,50 @@ rules:
       action: allow
       client_chain: my-upstream
 
-# Reference in server config
+# 在服务端配置中引用
 - address: "0.0.0.0:8080"
   protocol:
     type: http
-  rules: standard-rules        # Reference by name
+  rules: standard-rules        # 根据名称引用
 ```
 
-## Named PEMs
+## 命名 PEM (Named PEMs)
 
-Define certificates once and reference throughout configuration.
+只需定义一次证书，便可在整个配置中引用。
 
 ```yaml
-# From file
+# 来自文件
 - pem: my-cert
   path: /path/to/certificate.pem
 
-# Inline data
+# 内联数据
 - pem: my-key
   data: |
     -----BEGIN PRIVATE KEY-----
     ...
     -----END PRIVATE KEY-----
 
-# Reference in config
+# 在配置中引用
 - address: "0.0.0.0:443"
   protocol:
     type: tls
     tls_targets:
       "example.com":
-        cert: my-cert          # Reference by name
+        cert: my-cert          # 根据名称引用
         key: my-key
         protocol:
           type: http
 ```
 
-## Advanced Features
+## 高级功能 (Advanced Features)
 
 ### Vision (XTLS-Vision)
 
-Vision optimizes TLS-in-TLS scenarios by detecting inner TLS traffic and switching to direct mode for zero-copy performance.
+Vision 能够通过探测内部 TLS 流量并切换至直连模式来实现零拷贝性能，从而对 TLS-in-TLS 场景进行优化。
 
-**Requirements:**
-- Inner protocol MUST be VLESS
-- Works with both TLS and Reality
+**要求:**
+- 内部协议必须是 VLESS
+- 支持 TLS 和 Reality 协议
 
 ```yaml
 # TLS + Vision
@@ -736,13 +736,13 @@ protocol:
         user_id: "uuid"
 ```
 
-### XUDP Multiplexing
+### XUDP 多路复用 (XUDP Multiplexing)
 
-Automatically enabled for VMess and VLESS when `udp_enabled: true`. Multiplexes UDP traffic over a single connection.
+当设置 `udp_enabled: true` 时自动为 VMess 和 VLESS 启用。可通过单个连接复用 UDP 流量。
 
-### Proxy Chaining
+### 代理链 (Proxy Chaining)
 
-**Protocol nesting** (wrap one protocol in another):
+**协议嵌套** (将一种协议包装在另一种中):
 
 ```yaml
 client_chain:
@@ -755,7 +755,7 @@ client_chain:
       user_id: "uuid"
 ```
 
-**Multi-hop chains** (route through multiple proxies sequentially):
+**多跳链** (流量依次经过多个代理路由):
 
 ```yaml
 client_chain:
@@ -771,27 +771,27 @@ client_chain:
           user_id: "uuid"
 ```
 
-### Hot Reloading
+### 热重载 (Hot Reloading)
 
-Configuration changes are automatically detected and applied without restarting. Disable with `--no-reload` flag.
+自动检测并应用配置变更，无需重启。可通过 `--no-reload` 标志来禁用。
 
-### mTLS (Mutual TLS)
+### mTLS (双向 TLS)
 
-Require client certificates for authentication:
+要求客户端证书进行身份验证:
 
 ```yaml
-# Server side
+# 服务端
 protocol:
   type: tls
   tls_targets:
     "example.com":
       cert: server.crt
       key: server.key
-      client_ca_certs: [ca.crt]  # Required CA
-      client_fingerprints: ["sha256:..."]  # Optional specific certs
+      client_ca_certs: [ca.crt]  # 所需的 CA
+      client_fingerprints: ["sha256:..."]  # 可选的特定证书
       protocol: ...
 
-# Client side
+# 客户端
 client_chain:
   address: "example.com:443"
   protocol:
@@ -801,31 +801,31 @@ client_chain:
     protocol: ...
 ```
 
-## Command Line
+## 命令行 (Command Line)
 
 ```bash
 shoes [OPTIONS] <config.yaml> [config.yaml...]
 
 OPTIONS:
-  -t, --threads NUM    Worker threads (default: CPU count)
-  -d, --dry-run        Parse config and exit
-  --no-reload          Disable hot-reloading
+  -t, --threads NUM    工作线程数 (默认: CPU 核心数)
+  -d, --dry-run        解析配置并退出
+  --no-reload          禁用热重载
 
 COMMANDS:
-  generate-reality-keypair                       Generate Reality X25519 keypair
-  generate-shadowsocks-2022-password <cipher>    Generate Shadowsocks 2022 password
+  generate-reality-keypair                       生成 Reality X25519 密钥对
+  generate-shadowsocks-2022-password <cipher>    生成 Shadowsocks 2022 密码
 ```
 
-## Tips
+## 提示 (Tips)
 
-### Generate Keys
+### 生成密钥 (Generate Keys)
 
-**Reality keypair:**
+**Reality 密钥对:**
 ```bash
 shoes generate-reality-keypair
 ```
 
-**Shadowsocks 2022 password:**
+**Shadowsocks 2022 密码:**
 ```bash
 shoes generate-shadowsocks-2022-password 2022-blake3-aes-256-gcm
 ```
@@ -835,31 +835,31 @@ shoes generate-shadowsocks-2022-password 2022-blake3-aes-256-gcm
 uuidgen
 ```
 
-**TLS certificate fingerprint:**
+**TLS 证书指纹:**
 ```bash
 openssl x509 -in cert.pem -noout -fingerprint -sha256
 ```
 
-### Security Best Practices
+### 安全最佳实践 (Security Best Practices)
 
-- Use strong, random passwords
-- Keep private keys secure
-- Use `127.0.0.1` instead of `0.0.0.0` for local-only access
-- Use firewall rules to restrict access
-- Enable client certificate authentication for sensitive services
-- Use Vision with Reality for maximum privacy
+- 使用强大的随机密码
+- 妥善保管私钥
+- 使用 `127.0.0.1` 替代 `0.0.0.0` 用于仅本地访问
+- 使用防火墙规则限制访问
+- 为敏感服务启用客户端证书身份验证
+- 将 Vision 与 Reality 搭配使用以获得最大隐私
 
-### Performance Tips
+### 性能优化提示 (Performance Tips)
 
-- Enable `vision: true` for TLS-in-TLS scenarios
-- Use `tcp_settings.no_delay: true` for low latency
-- Set `quic_settings.num_endpoints` to match worker threads
-- Use QUIC transport for high-latency or lossy networks
+- 为 TLS-in-TLS 场景启用 `vision: true`
+- 为获得低延迟，使用 `tcp_settings.no_delay: true`
+- 将 `quic_settings.num_endpoints` 设为匹配工作线程数
+- 针对高延迟或容易丢包的网络，使用 QUIC 传输协议
 
-### Common Issues
+### 常见问题 (Common Issues)
 
-- **"Address already in use"**: Change port or stop conflicting service
-- **"Permission denied"**: Ports < 1024 require root/admin
-- **Reality connection fails**: Verify keys match, UUID matches, SNI matches server's reality_targets key
-- **Vision not working**: Ensure inner protocol is VLESS
-- **Config validation fails**: Run with `--dry-run` for detailed errors
+- **"Address already in use" (地址已被占用)**: 更改端口或停止发生冲突的服务
+- **"Permission denied" (权限被拒绝)**: 端口号 < 1024 时需要 root/管理员权限
+- **Reality 连接失败**: 检查密钥是否匹配、UUID 是否匹配、以及 SNI 是否与服务端的 reality_targets 键匹配
+- **Vision 无法工作**: 确保内部协议为 VLESS
+- **配置校验失败**: 使用 `--dry-run` 运行以获取详细错误信息
