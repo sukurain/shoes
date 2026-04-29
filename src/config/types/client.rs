@@ -358,8 +358,6 @@ pub struct WireGuardClientConfig {
     pub remote_dns_resolve: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dns: Vec<IpAddr>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reserved: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -688,6 +686,27 @@ invalid_client_field: "bad"
         assert!(
             err.contains("unknown field `invalid_client_field`"),
             "Error should mention unknown field: {err}"
+        );
+    }
+
+    #[test]
+    fn test_rejects_reserved_field_in_wireguard_config() {
+        let yaml = r#"
+type: wireguard
+private-key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+server: 203.0.113.10
+port: 51820
+ip: 10.8.0.2
+public-key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+reserved: [0, 0, 0]
+"#;
+        let result: Result<ClientProxyConfig, _> = serde_yaml::from_str(yaml);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("unknown field `reserved`"),
+            "Error should mention reserved as unknown field: {err}"
         );
     }
 
