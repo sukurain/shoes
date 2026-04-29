@@ -41,6 +41,20 @@ impl Transport {
     }
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum QuicCongestionControl {
+    #[default]
+    Default,
+    Bbr,
+}
+
+impl QuicCongestionControl {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TcpConfig {
     #[serde(default = "default_true")]
@@ -66,6 +80,8 @@ pub struct ServerQuicConfig {
     // num_endpoints of 0 will use the number of threads as the default value.
     #[serde(default)]
     pub num_endpoints: usize,
+    #[serde(default, skip_serializing_if = "QuicCongestionControl::is_default")]
+    pub congestion: QuicCongestionControl,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -82,6 +98,8 @@ pub struct ClientQuicConfig {
     pub key: Option<String>,
     #[serde(default)]
     pub cert: Option<String>,
+    #[serde(default, skip_serializing_if = "QuicCongestionControl::is_default")]
+    pub congestion: QuicCongestionControl,
 }
 
 impl Default for ClientQuicConfig {
@@ -93,6 +111,7 @@ impl Default for ClientQuicConfig {
             alpn_protocols: NoneOrSome::Unspecified,
             key: None,
             cert: None,
+            congestion: QuicCongestionControl::Default,
         }
     }
 }
