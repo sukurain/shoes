@@ -1,23 +1,25 @@
 # 更新日志
 
+本 fork 基于 https://github.com/cfal/shoes，并包含 WireGuard 出站、QUIC 配置和路由性能方面的修改。
+
 ## v0.2.8
 
 ### 新功能
 
 #### WireGuard 客户端出站
 
-新增套接字级别的 WireGuard 出站支持，可将选定流量通过 WireGuard 对等节点路由，包括 Cloudflare WARP 风格的配置。
+新增套接字级别的标准 WireGuard 出站支持，可将选定流量通过 WireGuard 对等节点路由。WARP 配置中的 `reserved`/client id 扩展不再支持。
 
 ```yaml
 client_chain:
   protocol:
     type: wireguard
     private-key: "YOUR_BASE64_PRIVATE_KEY"
-    server: 162.159.193.5
-    port: 4500
-    ip: 172.16.0.2
-    ipv6: 2606:4700:cf1:1000::1
-    public-key: "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
+    server: 203.0.113.10
+    port: 51820
+    ip: 10.8.0.2
+    ipv6: 2001:db8:100::2
+    public-key: "PEER_BASE64_PUBLIC_KEY"
     allowed-ips: ["0.0.0.0/0", "::/0"]
     udp: true
     mtu: 1408
@@ -26,15 +28,24 @@ client_chain:
     dns: ["2606:4700:4700::1111"]
 ```
 
-支持的 WireGuard 选项包括 `private-key`、`public-key`、`pre-shared-key`、`server`、`port`、`ip`、`ipv6`、`allowed-ips`、`udp`、`mtu`、`ip-version`、`remote-dns-resolve`、`dns` 和 `reserved`。
+支持的 WireGuard 选项包括 `private-key`、`public-key`、`pre-shared-key`、`server`、`port`、`ip`、`ipv6`、`allowed-ips`、`udp`、`mtu`、`ip-version`、`remote-dns-resolve` 和 `dns`。
+
+完整可复制示例：
+- `examples/wireguard_outbound_basic.yaml`
+- `examples/hysteria2_server_bbr.yaml`
+- `examples/tuic_v5_bbr.yaml`
+- `examples/quic_client_bbr.yaml`
 
 ### 改进
 
 - 在 WireGuard 运行时中添加了有界队列和数据包缓冲区复用，避免高负载下内存无限增长。
+- WireGuard 出站在配置重载或连接器释放时通过 cancellation token 停止后台任务，避免旧隧道继续持有 UDP socket。
+- WireGuard 出站队列满时会向上层返回背压错误，避免静默伪装为发送成功。
 - 为 WireGuard 出站主机名解析添加了远程 DNS 缓存。
 - 在运行时选择可用目标地址时强制执行 WireGuard `allowed-ips` 规则。
+- QUIC 拥塞控制支持 `quic_settings.congestion: bbr`，未配置时使用 Quinn 默认行为。
+- 客户端正常断开、QUIC stream reset、BrokenPipe、UnexpectedEof 等日志降级为 debug，减少运行时 ERROR 刷屏。
 - 新增索引化主机名规则匹配，加速大型主机名规则集的路由决策。
-- 为 WARP 风格对等节点使用的非零 WireGuard `reserved` 字节添加了本地 BoringTun 补丁。
 
 ## v0.2.7
 
