@@ -17,6 +17,7 @@ use crate::async_stream::{
     AsyncShutdownMessage, AsyncStream, AsyncWriteSessionMessage,
 };
 use crate::resolver::{NativeResolver, ResolverCache};
+use crate::util::is_benign_disconnect;
 
 use super::frame::{FrameMetadata, FrameOption, SessionStatus, TargetNetwork};
 
@@ -544,7 +545,11 @@ impl AsyncReadSessionMessage for XudpMessageStream {
                     continue;
                 }
                 Err(e) => {
-                    log::error!("[XUDP SESSION READ] Error reading from inner stream: {}", e);
+                    if is_benign_disconnect(&e) {
+                        log::debug!("[XUDP SESSION READ] inner stream closed by peer: {}", e);
+                    } else {
+                        log::error!("[XUDP SESSION READ] Error reading from inner stream: {}", e);
+                    }
                     return Poll::Ready(Err(e));
                 }
             }
