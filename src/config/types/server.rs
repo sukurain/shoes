@@ -12,6 +12,8 @@ use super::dns::DnsConfig;
 use super::rules::{ClientChainHop, RuleConfig};
 use super::selection::ConfigSelection;
 use super::shadowsocks::ShadowsocksConfig;
+#[cfg(test)]
+use super::transport::QuicCongestionControl;
 use super::transport::{BindLocation, ServerQuicConfig, TcpConfig, Transport};
 
 /// AnyTLS user configuration
@@ -910,6 +912,7 @@ mod tests {
                 client_ca_certs: NoneOrSome::None,
                 client_fingerprints: NoneOrSome::None,
                 num_endpoints: 1,
+                congestion: QuicCongestionControl::Default,
             }),
             rules: NoneOrSome::None,
             dns: None,
@@ -1066,6 +1069,7 @@ mod tests {
                 client_ca_certs: NoneOrSome::None,
                 client_fingerprints: NoneOrSome::None,
                 num_endpoints: 1,
+                congestion: QuicCongestionControl::Default,
             }),
             rules: NoneOrSome::None,
             dns: None,
@@ -1091,6 +1095,7 @@ mod tests {
                 client_ca_certs: NoneOrSome::None,
                 client_fingerprints: NoneOrSome::None,
                 num_endpoints: 1,
+                congestion: QuicCongestionControl::Default,
             }),
             rules: NoneOrSome::None,
             dns: None,
