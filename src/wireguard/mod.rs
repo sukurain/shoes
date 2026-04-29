@@ -26,6 +26,7 @@ use smoltcp::wire::{
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf};
 use tokio::net::UdpSocket;
 use tokio::sync::{Mutex as AsyncMutex, OnceCell, mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 
 use crate::address::{Address, NetLocation, ResolvedLocation};
 use crate::async_stream::{
@@ -149,6 +150,14 @@ impl std::fmt::Debug for WireGuardRuntime {
     }
 }
 
+impl Drop for WireGuardRuntime {
+    fn drop(&mut self) {
+        if let Some(inner) = self.inner.get() {
+            inner.shutdown_background_tasks();
+        }
+    }
+}
+
 impl WireGuardRuntime {
     async fn inner(&self, resolver: &Arc<dyn Resolver>) -> io::Result<Arc<WireGuardInner>> {
         self.inner
@@ -208,6 +217,7 @@ struct WireGuardInner {
     allowed_ips: Vec<AllowedIp>,
     dns_cache: Mutex<HashMap<DnsCacheKey, DnsCacheEntry>>,
     next_port: AtomicU16,
+    shutdown_token: CancellationToken,
 }
 
 impl std::fmt::Debug for WireGuardInner {
@@ -241,13 +251,12 @@ impl WireGuardInner {
             .as_deref()
             .map(|key| decode_wireguard_key("pre-shared-key", key))
             .transpose()?;
-        let peer = Box::new(Tunn::new_with_reserved(
+        let peer = Box::new(Tunn::new(
             private_key,
             public_key,
             pre_shared_key,
             Some(25),
             rand::random::<u32>() >> 8,
-            wireguard_reserved_bytes(config.reserved.as_deref())?,
             None,
         )
         .map_err(|err| io::Error::other(format!("failed to initialize WireGuard tunnel: {err}")))?);
@@ -264,6 +273,7 @@ impl WireGuardInner {
             allowed_ips,
             dns_cache: Mutex::new(HashMap::new()),
             next_port: AtomicU16::new(rand::random::<u16>()),
+            shutdown_token: CancellationToken::new(),
         });
 
         inner.start_background_tasks(outbound_rx);
@@ -272,28 +282,48 @@ impl WireGuardInner {
     }
 
     fn start_background_tasks(self: &Arc<Self>, outbound_rx: mpsc::Receiver<Packet>) {
-        tokio::spawn(Self::outbound_loop(self.clone(), outbound_rx));
-        tokio::spawn(Self::inbound_loop(self.clone()));
-        tokio::spawn(Self::timer_loop(self.clone()));
+        let _ = tokio::spawn(Self::outbound_loop(self.clone(), outbound_rx));
+        let _ = tokio::spawn(Self::inbound_loop(self.clone()));
+        let _ = tokio::spawn(Self::timer_loop(self.clone()));
+    }
+
+    fn shutdown_background_tasks(&self) {
+        self.shutdown_token.cancel();
     }
 
     async fn outbound_loop(inner: Arc<Self>, mut outbound_rx: mpsc::Receiver<Packet>) {
+        let shutdown_token = inner.shutdown_token.clone();
         let mut send_buf = vec![0u8; MAX_PACKET];
-        while let Some(packet) = outbound_rx.recv().await {
-            if let Err(err) = inner.send_ip_packet_with_buffer(&packet, &mut send_buf).await {
-                debug!("WireGuard send IP packet failed: {}", err);
+        loop {
+            tokio::select! {
+                _ = shutdown_token.cancelled() => break,
+                packet = outbound_rx.recv() => {
+                    let Some(packet) = packet else {
+                        break;
+                    };
+                    if let Err(err) = inner.send_ip_packet_with_buffer(&packet, &mut send_buf).await {
+                        debug!("WireGuard send IP packet failed: {}", err);
+                    }
+                }
             }
         }
     }
 
     async fn inbound_loop(inner: Arc<Self>) {
+        let shutdown_token = inner.shutdown_token.clone();
         let mut recv_buf = vec![0u8; MAX_PACKET];
         loop {
-            let size = match inner.udp.recv_from(&mut recv_buf).await {
+            let size = match tokio::select! {
+                _ = shutdown_token.cancelled() => break,
+                result = inner.udp.recv_from(&mut recv_buf) => result,
+            } {
                 Ok((size, _addr)) => size,
                 Err(err) => {
                     error!("WireGuard UDP recv failed: {}", err);
-                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    tokio::select! {
+                        _ = shutdown_token.cancelled() => break,
+                        _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+                    }
                     continue;
                 }
             };
@@ -313,9 +343,13 @@ impl WireGuardInner {
     }
 
     async fn timer_loop(inner: Arc<Self>) {
+        let shutdown_token = inner.shutdown_token.clone();
         let mut send_buf = vec![0u8; MAX_PACKET];
         loop {
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            tokio::select! {
+                _ = shutdown_token.cancelled() => break,
+                _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+            }
             let action = {
                 let mut peer = inner.peer.lock().await;
                 match peer.update_timers(&mut send_buf) {
@@ -429,9 +463,6 @@ impl WireGuardInner {
                 TunnResult::Done => {}
                 TunnResult::Err(err) => {
                     trace!("WireGuard decapsulate failed: {:?}", err);
-                }
-                other => {
-                    trace!("WireGuard decapsulate produced unexpected state: {:?}", other);
                 }
             }
             break;
@@ -828,7 +859,10 @@ impl AsyncWriteMessage for WireGuardUdpStream {
                     match err {
                         mpsc::error::TrySendError::Full(_) => {
                             warn!("WireGuard outbound queue full while sending UDP packet");
-                            return Poll::Ready(Ok(()));
+                            return Poll::Ready(Err(io::Error::new(
+                                io::ErrorKind::WouldBlock,
+                                "WireGuard outbound queue full",
+                            )));
                         }
                         mpsc::error::TrySendError::Closed(_) => {
                             return Poll::Ready(Err(io::Error::new(
@@ -1080,20 +1114,21 @@ impl Device for ChannelDevice {
         Self: 'a;
 
     fn receive(&mut self, _timestamp: SmolInstant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+        let outbound_permit = self.outbound_tx.clone().try_reserve_owned().ok()?;
         self.inbound.pop_front().map(|packet| {
             (
                 ChannelRxToken { packet },
-                ChannelTxToken {
-                    outbound_tx: self.outbound_tx.clone(),
-                },
+                ChannelTxToken { outbound_permit },
             )
         })
     }
 
     fn transmit(&mut self, _timestamp: SmolInstant) -> Option<Self::TxToken<'_>> {
-        Some(ChannelTxToken {
-            outbound_tx: self.outbound_tx.clone(),
-        })
+        self.outbound_tx
+            .clone()
+            .try_reserve_owned()
+            .ok()
+            .map(|outbound_permit| ChannelTxToken { outbound_permit })
     }
 
     fn capabilities(&self) -> DeviceCapabilities {
@@ -1123,7 +1158,7 @@ impl RxToken for ChannelRxToken {
 }
 
 struct ChannelTxToken {
-    outbound_tx: mpsc::Sender<Packet>,
+    outbound_permit: mpsc::OwnedPermit<Packet>,
 }
 
 impl TxToken for ChannelTxToken {
@@ -1133,9 +1168,7 @@ impl TxToken for ChannelTxToken {
     {
         let mut packet = vec![0u8; len];
         let result = f(&mut packet);
-        if self.outbound_tx.try_send(Bytes::from(packet)).is_err() {
-            warn!("WireGuard outbound queue full while sending TCP packet");
-        }
+        self.outbound_permit.send(Bytes::from(packet));
         result
     }
 }
@@ -1175,21 +1208,6 @@ fn decode_wireguard_key(field: &str, value: &str) -> io::Result<[u8; 32]> {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("WireGuard {field} must decode to 32 bytes, got {}", bytes.len()),
-        )
-    })
-}
-
-fn wireguard_reserved_bytes(value: Option<&[u8]>) -> io::Result<[u8; 3]> {
-    let Some(value) = value else {
-        return Ok([0, 0, 0]);
-    };
-    value.try_into().map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "WireGuard reserved must contain exactly 3 bytes, got {}",
-                value.len()
-            ),
         )
     })
 }
@@ -1507,5 +1525,131 @@ fn skip_dns_name(packet: &[u8], mut pos: usize) -> Option<usize> {
         if pos > packet.len() {
             return None;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn test_allowed_ips_ipv4_cidr() {
+        let allowed = parse_allowed_ips(&["10.0.0.0/8".to_string()]).unwrap();
+
+        assert!(allowed[0].contains(IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3))));
+        assert!(!allowed[0].contains(IpAddr::V4(Ipv4Addr::new(11, 1, 2, 3))));
+        assert!(!allowed[0].contains(IpAddr::V6(Ipv6Addr::LOCALHOST)));
+    }
+
+    #[test]
+    fn test_allowed_ips_rejects_invalid_prefix() {
+        let err = parse_allowed_ips(&["192.0.2.1/33".to_string()])
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("prefix 33"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_sort_by_ip_version_preference() {
+        let mut addrs = vec![
+            "192.0.2.1:443".parse::<SocketAddr>().unwrap(),
+            "[2001:db8::1]:443".parse::<SocketAddr>().unwrap(),
+        ];
+
+        sort_by_ip_version(&mut addrs, WireGuardIpVersion::Ipv6Prefer);
+        assert!(addrs[0].is_ipv6());
+
+        sort_by_ip_version(&mut addrs, WireGuardIpVersion::Ipv4Prefer);
+        assert!(addrs[0].is_ipv4());
+    }
+
+    #[test]
+    fn test_build_and_parse_ipv4_udp_packet() {
+        let src = "10.8.0.2:49152".parse::<SocketAddr>().unwrap();
+        let dst = "1.1.1.1:53".parse::<SocketAddr>().unwrap();
+        let payload = b"hello";
+
+        let packet = build_udp_packet(payload, src, dst).unwrap();
+        let (parsed_payload, parsed_src, parsed_dst) = parse_udp_packet(&packet).unwrap();
+
+        assert_eq!(parsed_payload.as_ref(), payload);
+        assert_eq!(parsed_src, src);
+        assert_eq!(parsed_dst, dst);
+    }
+
+    #[test]
+    fn test_build_and_parse_ipv6_udp_packet() {
+        let src = "[2001:db8::2]:49152".parse::<SocketAddr>().unwrap();
+        let dst = "[2001:4860:4860::8888]:53"
+            .parse::<SocketAddr>()
+            .unwrap();
+        let payload = b"hello";
+
+        let packet = build_udp_packet(payload, src, dst).unwrap();
+        let (parsed_payload, parsed_src, parsed_dst) = parse_udp_packet(&packet).unwrap();
+
+        assert_eq!(parsed_payload.as_ref(), payload);
+        assert_eq!(parsed_src, src);
+        assert_eq!(parsed_dst, dst);
+    }
+
+    #[test]
+    fn test_build_udp_packet_rejects_mixed_ip_versions() {
+        let src = "10.8.0.2:49152".parse::<SocketAddr>().unwrap();
+        let dst = "[2001:4860:4860::8888]:53"
+            .parse::<SocketAddr>()
+            .unwrap();
+
+        assert!(build_udp_packet(b"hello", src, dst).is_err());
+    }
+
+    #[test]
+    fn test_parse_dns_response_a_record() {
+        let response = dns_response_with_answer(0x1234, 1, 300, &[93, 184, 216, 34]);
+        let parsed = parse_dns_response(0x1234, 1, &response).unwrap();
+
+        assert_eq!(parsed.addrs, vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]);
+        assert_eq!(parsed.ttl, Duration::from_secs(300));
+    }
+
+    #[test]
+    fn test_parse_dns_response_aaaa_record() {
+        let addr = Ipv6Addr::new(0x2606, 0x2800, 0x220, 0x1, 0, 0, 0, 0x25c8);
+        let response = dns_response_with_answer(0x1234, 28, 120, &addr.octets());
+        let parsed = parse_dns_response(0x1234, 28, &response).unwrap();
+
+        assert_eq!(parsed.addrs, vec![IpAddr::V6(addr)]);
+        assert_eq!(parsed.ttl, Duration::from_secs(120));
+    }
+
+    #[test]
+    fn test_parse_dns_response_ignores_wrong_id() {
+        let response = dns_response_with_answer(0x1234, 1, 300, &[93, 184, 216, 34]);
+
+        assert!(parse_dns_response(0x4321, 1, &response).is_none());
+    }
+
+    fn dns_response_with_answer(id: u16, qtype: u16, ttl: u32, rdata: &[u8]) -> Vec<u8> {
+        let mut packet = Vec::new();
+        packet.extend_from_slice(&id.to_be_bytes());
+        packet.extend_from_slice(&0x8180u16.to_be_bytes());
+        packet.extend_from_slice(&1u16.to_be_bytes());
+        packet.extend_from_slice(&1u16.to_be_bytes());
+        packet.extend_from_slice(&0u16.to_be_bytes());
+        packet.extend_from_slice(&0u16.to_be_bytes());
+        packet.extend_from_slice(&[
+            7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o', b'm', 0,
+        ]);
+        packet.extend_from_slice(&qtype.to_be_bytes());
+        packet.extend_from_slice(&1u16.to_be_bytes());
+        packet.extend_from_slice(&[0xc0, 0x0c]);
+        packet.extend_from_slice(&qtype.to_be_bytes());
+        packet.extend_from_slice(&1u16.to_be_bytes());
+        packet.extend_from_slice(&ttl.to_be_bytes());
+        packet.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        packet.extend_from_slice(rdata);
+        packet
     }
 }
