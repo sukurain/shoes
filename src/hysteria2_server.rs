@@ -32,12 +32,13 @@ const CLOSE_ERR_CODE_OK: u32 = 0x100; // HTTP3 ErrCodeNoError
 use crate::address::NetLocation;
 use crate::async_stream::AsyncStream;
 use crate::client_proxy_selector::{ClientProxySelector, ConnectDecision};
+use crate::config::QuicCongestionControl;
 use crate::copy_bidirectional::copy_bidirectional_with_sizes;
 use crate::quic_stream::QuicStream;
 use crate::resolver::{Resolver, ResolverCache};
 use crate::stream_reader::StreamReader;
 use crate::tcp::tcp_server::setup_client_tcp_stream;
-use crate::util::allocate_vec;
+use crate::util::{allocate_vec, is_benign_disconnect};
 
 async fn process_connection(
     client_proxy_selector: Arc<ClientProxySelector>,
@@ -138,7 +139,11 @@ async fn process_connection(
 
     // Per sing-box reference (service.go:277-293), close connection on error
     if let Err(ref e) = result {
-        error!("Connection failed: {e}");
+        if is_benign_disconnect(e) {
+            debug!("Hysteria2 connection closed by peer: {e}");
+        } else {
+            error!("Connection failed: {e}");
+        }
         connection.close(CLOSE_ERR_CODE_OK.into(), b"");
     }
 
@@ -179,6 +184,17 @@ fn validate_auth_request<T>(req: http::Request<T>, password: &str) -> std::io::R
     }
 
     Ok(())
+}
+
+fn map_datagram_read_error(err: quinn::ConnectionError) -> std::io::Error {
+    let message = format!("failed to read datagram: {err}");
+    match err {
+        quinn::ConnectionError::ApplicationClosed(_)
+        | quinn::ConnectionError::ConnectionClosed(_) => {
+            std::io::Error::new(std::io::ErrorKind::ConnectionAborted, message)
+        }
+        _ => std::io::Error::other(message),
+    }
 }
 
 fn generate_ascii_string() -> String {
@@ -307,7 +323,11 @@ impl UdpSession {
             )
             .await
             {
-                error!("UDP remote-to-local write loop ended with error: {e}");
+                if is_benign_disconnect(&e) {
+                    debug!("Hysteria2 UDP remote-to-local loop closed by peer: {e}");
+                } else {
+                    error!("UDP remote-to-local write loop ended with error: {e}");
+                }
             }
         });
 
@@ -460,7 +480,7 @@ async fn run_udp_local_to_remote_loop(
         let data = connection
             .read_datagram()
             .await
-            .map_err(|err| std::io::Error::other(format!("failed to read datagram: {err}")))?;
+            .map_err(map_datagram_read_error)?;
 
         // Per official hysteria reference (server.go:332-353), parse errors are ignored
         // and we continue waiting for the next message. Only connection errors are fatal.
@@ -724,7 +744,11 @@ async fn run_udp_local_to_remote_loop(
             .send_to(&complete_payload, socket_addr)
             .await
         {
-            error!("Failed to forward UDP payload for session {session_id}: {e}");
+            if is_benign_disconnect(&e) {
+                debug!("Hysteria2 UDP session {session_id} closed while forwarding payload: {e}");
+            } else {
+                error!("Failed to forward UDP payload for session {session_id}: {e}");
+            }
             sessions.remove(&session_id);
         }
     }
@@ -757,7 +781,11 @@ async fn run_tcp_loop(
             if let Err(e) =
                 process_tcp_stream(client_proxy_selector, resolver, send_stream, recv_stream).await
             {
-                error!("Failed to process streams: {e}");
+                if is_benign_disconnect(&e) {
+                    debug!("Hysteria2 stream closed by peer: {e}");
+                } else {
+                    error!("Failed to process streams: {e}");
+                }
             }
         });
     }
@@ -978,6 +1006,7 @@ pub async fn start_hysteria2_server(
     client_proxy_selector: Arc<ClientProxySelector>,
     resolver: Arc<dyn Resolver>,
     num_endpoints: usize,
+    congestion: QuicCongestionControl,
     udp_enabled: bool,
 ) -> std::io::Result<Vec<JoinHandle<()>>> {
     let mut join_handles = vec![];
@@ -990,9 +1019,13 @@ pub async fn start_hysteria2_server(
             let mut server_config = quinn::ServerConfig::with_crypto(quic_server_config);
 
             // values estimated from https://github.com/apernet/hysteria/blob/5520bcc405ee11a47c164c75bae5c40fc2b1d99d/core/server/config.go#L16
-            Arc::get_mut(&mut server_config.transport)
-                .unwrap()
-                .congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()))
+            let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
+            if matches!(congestion, QuicCongestionControl::Bbr) {
+                transport_config.congestion_controller_factory(Arc::new(
+                    quinn::congestion::BbrConfig::default(),
+                ));
+            }
+            transport_config
                 .max_concurrent_bidi_streams(4096_u32.into())
                 // required for HTTP/3 QPACK updates
                 .max_concurrent_uni_streams(1024_u32.into())
@@ -1043,7 +1076,11 @@ pub async fn start_hysteria2_server(
                     )
                     .await
                     {
-                        error!("Connection ended with error: {e}");
+                        if is_benign_disconnect(&e) {
+                            debug!("Hysteria2 connection ended after peer disconnect: {e}");
+                        } else {
+                            error!("Connection ended with error: {e}");
+                        }
                     }
                 });
             }
