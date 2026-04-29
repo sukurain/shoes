@@ -1,0 +1,18 @@
+# Minimal TUIC v5 server with QUIC BBR.
+#
+# Replace cert/key/uuid/password before running:
+#   shoes examples/tuic_v5_bbr.yaml
+
+- address: "[::]:443"
+  transport: quic
+  quic_settings:
+    cert: /etc/shoes/cert.pem
+    key: /etc/shoes/key.pem
+    congestion: bbr
+  protocol:
+    type: tuic
+    uuid: d685aef3-b3c4-4932-9a9d-d0c2f6727dfa
+    password: "CHANGE_ME"
+    zero_rtt_handshake: false
+  rules:
+    - allow-all-direct

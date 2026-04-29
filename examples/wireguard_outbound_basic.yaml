@@ -1,0 +1,32 @@
+# Local SOCKS5 server that routes all traffic through a standard WireGuard peer.
+#
+# Replace private-key, public-key, server, ip, and ipv6 with values from your
+# WireGuard profile. WARP reserved/client id bytes are not supported.
+
+- client_group: wireguard-exit
+  client_proxies:
+    - protocol:
+        type: wireguard
+        private-key: "YOUR_BASE64_PRIVATE_KEY"
+        server: 203.0.113.10
+        port: 51820
+        ip: 10.8.0.2
+        ipv6: "2001:db8:100::2"
+        public-key: "PEER_BASE64_PUBLIC_KEY"
+        allowed-ips: ["0.0.0.0/0", "::/0"]
+        udp: true
+        mtu: 1420
+        ip-version: ipv4-prefer
+        remote-dns-resolve: true
+        dns:
+          - 1.1.1.1
+          - "2606:4700:4700::1111"
+
+- address: 127.0.0.1:1080
+  protocol:
+    type: socks
+    udp_enabled: true
+  rules:
+    - masks: ["0.0.0.0/0", "::/0"]
+      action: allow
+      client_chain: wireguard-exit

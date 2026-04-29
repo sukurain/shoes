@@ -1,0 +1,27 @@
+# Local SOCKS5 server that forwards traffic through an upstream QUIC proxy with BBR.
+#
+# Replace the upstream address, SNI, and upstream protocol credentials before running.
+
+- client_group: quic-upstream
+  client_proxies:
+    - address: proxy.example.com:443
+      transport: quic
+      quic_settings:
+        verify: true
+        sni_hostname: proxy.example.com
+        alpn_protocols:
+          - h3
+        congestion: bbr
+      protocol:
+        type: socks
+        username: "CHANGE_ME"
+        password: "CHANGE_ME"
+
+- address: 127.0.0.1:1080
+  protocol:
+    type: socks
+    udp_enabled: true
+  rules:
+    - masks: ["0.0.0.0/0", "::/0"]
+      action: allow
+      client_chain: quic-upstream

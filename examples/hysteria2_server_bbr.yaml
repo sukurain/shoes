@@ -1,0 +1,19 @@
+# Minimal Hysteria2 server with QUIC BBR.
+#
+# Replace cert/key/password before running:
+#   shoes examples/hysteria2_server_bbr.yaml
+
+- address: "[::]:443"
+  transport: quic
+  quic_settings:
+    cert: /etc/shoes/cert.pem
+    key: /etc/shoes/key.pem
+    alpn_protocols:
+      - h3
+    congestion: bbr
+  protocol:
+    type: hysteria2
+    password: "CHANGE_ME"
+    udp_enabled: true
+  rules:
+    - allow-all-direct
