@@ -1063,18 +1063,6 @@ fn validate_wireguard_client_config(config: &super::types::WireGuardClientConfig
         }
     }
 
-    if let Some(reserved) = &config.reserved
-        && reserved.len() != 3
-    {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!(
-                "WireGuard reserved must contain exactly 3 bytes, got {}.",
-                reserved.len()
-            ),
-        ));
-    }
-
     Ok(())
 }
 
