@@ -16,8 +16,8 @@ use tokio::net::UdpSocket;
 
 use crate::address::{NetLocation, ResolvedLocation};
 use crate::async_stream::AsyncStream;
-use crate::config::{ClientConfig, ClientQuicConfig, Transport};
 use crate::config::ClientProxyConfig;
+use crate::config::{ClientConfig, ClientQuicConfig, QuicCongestionControl, Transport};
 use crate::quic_stream::QuicStream;
 use crate::resolver::{Resolver, resolve_addresses, resolve_location};
 use crate::rustls_config_util::create_client_config;
@@ -114,6 +114,7 @@ impl SocketConnectorImpl {
                     sni_hostname,
                     key,
                     cert,
+                    congestion,
                 } = config.quic_settings.clone().unwrap_or_default();
 
                 let sni_hostname = if sni_hostname.is_unspecified() {
@@ -161,6 +162,11 @@ impl SocketConnectorImpl {
                     quinn::ClientConfig::new(Arc::new(quic_client_config));
 
                 let mut transport_config = quinn::TransportConfig::default();
+                if matches!(congestion, QuicCongestionControl::Bbr) {
+                    transport_config.congestion_controller_factory(Arc::new(
+                        quinn::congestion::BbrConfig::default(),
+                    ));
+                }
                 transport_config
                     .max_concurrent_bidi_streams(0_u32.into())
                     .max_concurrent_uni_streams(0_u8.into())
