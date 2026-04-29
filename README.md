@@ -1,6 +1,6 @@
 # 更新日志
 
-本 fork 基于 https://github.com/cfal/shoes，并包含 WireGuard 出站、QUIC 配置和路由性能方面的修改。
+本 fork 基于 https://github.com/cfal/shoes 并包含 WireGuard 出站、QUIC 配置和路由性能方面的修改。
 
 ## v0.2.8
 
