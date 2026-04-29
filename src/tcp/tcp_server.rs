@@ -25,7 +25,7 @@ use crate::socket_util::{new_tcp_listener, set_tcp_keepalive};
 use crate::tcp::tcp_handler::{TcpClientSetupResult, TcpServerHandler, TcpServerSetupResult};
 #[cfg(unix)]
 use crate::tun::start_tun_server;
-use crate::util::write_all;
+use crate::util::{is_benign_disconnect, write_all};
 
 async fn run_tcp_server(
     bind_address: SocketAddr,
@@ -62,7 +62,11 @@ async fn run_tcp_server(
         let cloned_handler = server_handler.clone();
         tokio::spawn(async move {
             if let Err(e) = process_stream(stream, cloned_handler, cloned_resolver).await {
-                error!("{}:{} finished with error: {:?}", addr.ip(), addr.port(), e);
+                if is_benign_disconnect(&e) {
+                    debug!("{}:{} disconnected: {:?}", addr.ip(), addr.port(), e);
+                } else {
+                    error!("{}:{} finished with error: {:?}", addr.ip(), addr.port(), e);
+                }
             } else {
                 debug!("{}:{} finished successfully", addr.ip(), addr.port());
             }
@@ -99,7 +103,11 @@ async fn run_unix_server(
         let cloned_handler = server_handler.clone();
         tokio::spawn(async move {
             if let Err(e) = process_stream(stream, cloned_handler, cloned_resolver).await {
-                error!("{addr:?} finished with error: {e:?}");
+                if is_benign_disconnect(&e) {
+                    debug!("{addr:?} disconnected: {e:?}");
+                } else {
+                    error!("{addr:?} finished with error: {e:?}");
+                }
             } else {
                 debug!("{addr:?} finished successfully");
             }
