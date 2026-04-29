@@ -92,7 +92,7 @@ pub fn build_client_proxy_chain(
                     if config.protocol.is_socket_only() {
                         panic!(
                             "protocol: {} is only valid at hop 0. Found it at hop {} with address {}",
-                            config.protocol.protocol_name(),
+                            config.protocol.protocol_name().to_ascii_lowercase(),
                             hop_index,
                             config.address
                         );
