@@ -17,12 +17,13 @@ use tokio_util::sync::CancellationToken;
 use crate::address::{Address, NetLocation};
 use crate::async_stream::AsyncStream;
 use crate::client_proxy_selector::{ClientProxySelector, ConnectDecision};
+use crate::config::QuicCongestionControl;
 use crate::copy_bidirectional::copy_bidirectional_with_sizes;
 use crate::quic_stream::QuicStream;
 use crate::resolver::{Resolver, resolve_single_address};
 use crate::stream_reader::StreamReader;
 use crate::tcp::tcp_server::setup_client_tcp_stream;
-use crate::util::{allocate_vec, write_all};
+use crate::util::{allocate_vec, is_benign_disconnect, write_all};
 
 const COMMAND_TYPE_AUTHENTICATE: u8 = 0x00;
 const COMMAND_TYPE_CONNECT: u8 = 0x01;
@@ -151,7 +152,11 @@ async fn process_connection(
 
     // Per sing-box reference (service.go:382-398), close connection on error
     if let Err(ref e) = result {
-        error!("Connection failed: {e}");
+        if is_benign_disconnect(e) {
+            debug!("TUIC connection closed by peer: {e}");
+        } else {
+            error!("Connection failed: {e}");
+        }
         connection.close(0u32.into(), b"");
     }
 
@@ -186,6 +191,17 @@ async fn run_heartbeat_loop(
                 }
             }
         }
+    }
+}
+
+fn map_datagram_read_error(err: quinn::ConnectionError) -> std::io::Error {
+    let message = format!("failed to read datagram: {err}");
+    match err {
+        quinn::ConnectionError::ApplicationClosed(_)
+        | quinn::ConnectionError::ConnectionClosed(_) => {
+            std::io::Error::new(std::io::ErrorKind::ConnectionAborted, message)
+        }
+        _ => std::io::Error::other(message),
     }
 }
 
@@ -280,7 +296,11 @@ async fn run_bidirectional_loop(
                 }
                 Err(e) => {
                     // TCP proxying errors are just logged (handle_task.rs:238-246)
-                    error!("Error processing TCP stream: {e}");
+                    if is_benign_disconnect(&e) {
+                        debug!("TUIC TCP stream closed by peer: {e}");
+                    } else {
+                        error!("Error processing TCP stream: {e}");
+                    }
                 }
             }
         });
@@ -526,7 +546,11 @@ impl UdpSession {
             )
             .await
             {
-                error!("UDP remote-to-local write loop ended with error: {e}");
+                if is_benign_disconnect(&e) {
+                    debug!("TUIC UDP stream remote-to-local loop closed by peer: {e}");
+                } else {
+                    error!("UDP remote-to-local write loop ended with error: {e}");
+                }
             }
         });
 
@@ -566,7 +590,11 @@ impl UdpSession {
             )
             .await
             {
-                error!("UDP remote-to-local write loop ended with error: {e}");
+                if is_benign_disconnect(&e) {
+                    debug!("TUIC UDP datagram remote-to-local loop closed by peer: {e}");
+                } else {
+                    error!("UDP remote-to-local write loop ended with error: {e}");
+                }
             }
         });
 
@@ -896,7 +924,11 @@ async fn run_unidirectional_loop(
                 Err(e) => {
                     // Per official TUIC reference (handle_stream.rs:70-78),
                     // uni stream errors close the connection
-                    error!("Error processing uni stream, closing connection: {e}");
+                    if is_benign_disconnect(&e) {
+                        debug!("TUIC uni stream closed by peer: {e}");
+                    } else {
+                        error!("Error processing uni stream, closing connection: {e}");
+                    }
                     connection.close(0u32.into(), b"");
                 }
             }
@@ -1132,7 +1164,11 @@ async fn process_udp_packet(
             .send_to(payload_fragment, socket_addr)
             .await
         {
-            error!("Failed to forward UDP payload for session {assoc_id}: {e}");
+            if is_benign_disconnect(&e) {
+                debug!("TUIC UDP session {assoc_id} closed while forwarding payload: {e}");
+            } else {
+                error!("Failed to forward UDP payload for session {assoc_id}: {e}");
+            }
             drop(session);
             udp_session_map.remove(&assoc_id);
             return Ok(());
@@ -1230,7 +1266,11 @@ async fn process_udp_packet(
             .send_to(&complete_payload, socket_addr)
             .await
         {
-            error!("Failed to forward UDP payload for session {assoc_id}: {e}");
+            if is_benign_disconnect(&e) {
+                debug!("TUIC UDP session {assoc_id} closed while forwarding payload: {e}");
+            } else {
+                error!("Failed to forward UDP payload for session {assoc_id}: {e}");
+            }
             drop(session);
             udp_session_map.remove(&assoc_id);
             return Ok(());
@@ -1279,7 +1319,7 @@ async fn run_datagram_loop(
         let data = connection
             .read_datagram()
             .await
-            .map_err(|err| std::io::Error::other(format!("failed to read datagram: {err}")))?;
+            .map_err(map_datagram_read_error)?;
 
         // Per official TUIC reference (handle_stream.rs:172-180), protocol errors close the connection
         if data.len() < 2 {
@@ -1385,7 +1425,11 @@ async fn run_datagram_loop(
         )
         .await
         {
-            error!("Failed to process datagram UDP packet: {e}");
+            if is_benign_disconnect(&e) {
+                debug!("TUIC datagram UDP packet closed by peer: {e}");
+            } else {
+                error!("Failed to process datagram UDP packet: {e}");
+            }
         }
     }
 }
@@ -1399,6 +1443,7 @@ pub async fn start_tuic_server(
     client_proxy_selector: Arc<ClientProxySelector>,
     resolver: Arc<dyn Resolver>,
     num_endpoints: usize,
+    congestion: QuicCongestionControl,
     zero_rtt_handshake: bool,
 ) -> std::io::Result<Vec<JoinHandle<()>>> {
     let mut join_handles = vec![];
@@ -1410,9 +1455,13 @@ pub async fn start_tuic_server(
         let join_handle = tokio::spawn(async move {
             let mut server_config = quinn::ServerConfig::with_crypto(quic_server_config);
 
-            Arc::get_mut(&mut server_config.transport)
-                .unwrap()
-                .congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()))
+            let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
+            if matches!(congestion, QuicCongestionControl::Bbr) {
+                transport_config.congestion_controller_factory(Arc::new(
+                    quinn::congestion::BbrConfig::default(),
+                ));
+            }
+            transport_config
                 .max_concurrent_bidi_streams(4096_u32.into())
                 .max_concurrent_uni_streams(4096_u32.into())
                 .max_idle_timeout(Some(Duration::from_secs(60).try_into().unwrap()))
@@ -1463,7 +1512,11 @@ pub async fn start_tuic_server(
                     )
                     .await
                     {
-                        error!("Connection ended with error: {e}");
+                        if is_benign_disconnect(&e) {
+                            debug!("TUIC connection ended after peer disconnect: {e}");
+                        } else {
+                            error!("Connection ended with error: {e}");
+                        }
                     }
                 });
             }
