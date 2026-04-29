@@ -11,7 +11,8 @@ use tokio::time::timeout;
 use crate::async_stream::AsyncStream;
 use crate::client_proxy_selector::ConnectDecision;
 use crate::config::{
-    BindLocation, ConfigSelection, ServerConfig, ServerProxyConfig, ServerQuicConfig,
+    BindLocation, ConfigSelection, QuicCongestionControl, ServerConfig, ServerProxyConfig,
+    ServerQuicConfig,
 };
 use crate::copy_bidirectional::copy_bidirectional;
 use crate::quic_stream::QuicStream;
@@ -23,6 +24,7 @@ use crate::tcp::tcp_client_handler_factory::create_tcp_client_proxy_selector;
 use crate::tcp::tcp_handler::{TcpServerHandler, TcpServerSetupResult};
 use crate::tcp::tcp_server::{run_udp_copy, setup_client_tcp_stream};
 use crate::tcp::tcp_server_handler_factory::create_tcp_server_handler;
+use crate::util::is_benign_disconnect;
 use crate::uuid_util::parse_uuid;
 
 async fn start_quic_server(
@@ -31,6 +33,7 @@ async fn start_quic_server(
     resolver: Arc<dyn Resolver>,
     server_handler: Arc<dyn TcpServerHandler>,
     num_endpoints: usize,
+    congestion: QuicCongestionControl,
 ) -> std::io::Result<Vec<JoinHandle<()>>> {
     // TODO: consider setting transport config
     //   Arc::get_mut(&mut server_config.transport)
@@ -43,9 +46,10 @@ async fn start_quic_server(
     let mut join_handles = vec![];
     for _ in 0..num_endpoints {
         let mut server_config = quinn::ServerConfig::with_crypto(quic_server_config.clone());
-        Arc::get_mut(&mut server_config.transport)
-            .unwrap()
-            .congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+        apply_quic_congestion(
+            Arc::get_mut(&mut server_config.transport).unwrap(),
+            congestion,
+        );
 
         let socket2_socket =
             new_socket2_udp_socket(bind_address.is_ipv6(), None, Some(bind_address), true).unwrap();
@@ -65,7 +69,11 @@ async fn start_quic_server(
                 let server_handler = server_handler.clone();
                 tokio::spawn(async move {
                     if let Err(e) = process_connection(resolver, server_handler, conn).await {
-                        error!("Connection ended with error: {e}");
+                        if is_benign_disconnect(&e) {
+                            debug!("QUIC connection closed by peer: {e}");
+                        } else {
+                            error!("Connection ended with error: {e}");
+                        }
                     }
                 });
             }
@@ -75,6 +83,20 @@ async fn start_quic_server(
     }
 
     Ok(join_handles)
+}
+
+fn apply_quic_congestion(
+    transport_config: &mut quinn::TransportConfig,
+    congestion: QuicCongestionControl,
+) {
+    match congestion {
+        QuicCongestionControl::Default => {}
+        QuicCongestionControl::Bbr => {
+            transport_config.congestion_controller_factory(Arc::new(
+                quinn::congestion::BbrConfig::default(),
+            ));
+        }
+    }
 }
 
 async fn process_connection(
@@ -90,6 +112,10 @@ async fn process_connection(
                 debug!("Connection closed");
                 break;
             }
+            Err(quinn::ConnectionError::ConnectionClosed(_)) => {
+                debug!("Connection closed");
+                break;
+            }
             Err(e) => {
                 return Err(std::io::Error::other(format!("quic connection error: {e}")));
             }
@@ -99,7 +125,11 @@ async fn process_connection(
         let cloned_handler = server_handler.clone();
         tokio::spawn(async move {
             if let Err(e) = process_streams(cloned_resolver, cloned_handler, stream).await {
-                error!("Failed to process streams: {e}");
+                if is_benign_disconnect(&e) {
+                    debug!("QUIC stream closed by peer: {e}");
+                } else {
+                    error!("Failed to process streams: {e}");
+                }
             }
         });
     }
@@ -303,6 +333,7 @@ pub async fn start_quic_servers(
         alpn_protocols,
         client_fingerprints,
         num_endpoints,
+        congestion,
     } = quic_settings.unwrap();
 
     // Certificates are already embedded as PEM data during config validation
@@ -354,6 +385,7 @@ pub async fn start_quic_servers(
                     client_proxy_selector,
                     resolver,
                     num_endpoints,
+                    congestion,
                     udp_enabled,
                 )
                 .await?;
@@ -379,6 +411,7 @@ pub async fn start_quic_servers(
                     client_proxy_selector,
                     resolver,
                     num_endpoints,
+                    congestion,
                     zero_rtt_handshake,
                 )
                 .await?;
@@ -402,6 +435,7 @@ pub async fn start_quic_servers(
                     resolver,
                     tcp_handler,
                     num_endpoints,
+                    congestion,
                 )
                 .await?;
 
