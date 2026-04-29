@@ -93,9 +93,6 @@ serde_json = "*"
 tempfile = "*"
 tokio-rustls = "*"
 
-[patch.crates-io]
-boringtun = { path = "vendor/boringtun" }
-
 # jemalloc for better memory performance (not supported on Windows MSVC or iOS)
 [target.'cfg(not(any(target_env = "msvc", target_os = "ios")))'.dependencies]
 tikv-jemallocator = "*"
